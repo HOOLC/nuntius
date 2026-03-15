@@ -1,0 +1,24 @@
+{
+  "name": "nuntius",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "discord:register": "node dist/register-discord-commands.js",
+    "discord:start": "node dist/discord-bot.js",
+    "im:local": "node dist/local-im-cli.js",
+    "slack:start": "node dist/slack-bot.js",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "smol-toml": "^1.6.0"
+  }
+}

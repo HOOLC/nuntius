@@ -1,0 +1,34 @@
+[bridge]
+codex_binary = "codex"
+default_repository_id = "nuntius"
+require_explicit_repository_selection = true
+handler_workspace_path = "."
+handler_sandbox_mode = "read-only"
+max_handler_steps_per_turn = 4
+session_store_path = ".nuntius/sessions.json"
+max_response_chars = 3500
+repository_registry_path = "config/repository-registry.example.toml"
+
+[discord]
+token = "discord-bot-token"
+application_id = "123456789012345678"
+guild_id = "123456789012345678"
+thread_auto_archive_minutes = 1440
+thread_name_prefix = "codex"
+allowed_user_ids = ["111111111111111111"]
+admin_user_ids = ["111111111111111111"]
+# Only needed for `/codexadmin restart`. `/codexadmin hotreload` does not require this.
+allow_process_restart = false
+
+[slack]
+bot_token = "xoxb-your-slack-bot-token"
+signing_secret = "your-slack-signing-secret"
+host = "0.0.0.0"
+port = 8788
+command_path = "/slack/commands"
+events_path = "/slack/events"
+health_path = "/healthz"
+allowed_user_ids = ["U0123456789"]
+admin_user_ids = ["U0123456789"]
+# Only needed for `/codexadmin restart`.
+allow_process_restart = false
