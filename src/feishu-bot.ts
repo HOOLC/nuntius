@@ -1,13 +1,7 @@
-import { createDecipheriv, createHash, timingSafeEqual } from "node:crypto";
-import {
-  createServer,
-  type IncomingHttpHeaders,
-  type IncomingMessage,
-  type Server,
-  type ServerResponse
-} from "node:http";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+
+import * as Lark from "@larksuiteoapi/node-sdk";
 
 import { FeishuAdapter, type FeishuEnvelope } from "./adapters/feishu.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
@@ -45,21 +39,6 @@ interface FeishuMessageResponse {
   };
 }
 
-interface FeishuVerificationPayload {
-  challenge: string;
-  token?: string;
-  type: "url_verification";
-}
-
-interface FeishuEventHeader {
-  event_id?: string;
-  event_type?: string;
-  create_time?: string;
-  token?: string;
-  app_id?: string;
-  tenant_key?: string;
-}
-
 interface FeishuUserId {
   open_id?: string;
   user_id?: string;
@@ -81,26 +60,28 @@ interface FeishuMessageEventPayload {
   update_time?: string;
   chat_id: string;
   thread_id?: string;
-  chat_type?: "p2p" | "group";
+  chat_type?: string;
   message_type?: string;
   content?: string;
   mentions?: FeishuMention[];
 }
 
 interface FeishuMessageReceiveEvent {
+  event_id?: string;
+  token?: string;
+  create_time?: string;
+  event_type?: string;
+  tenant_key?: string;
+  ts?: string;
+  uuid?: string;
+  type?: string;
+  app_id?: string;
   sender?: {
     sender_id?: FeishuUserId;
     sender_type?: string;
     tenant_key?: string;
   };
   message?: FeishuMessageEventPayload;
-}
-
-interface FeishuEventEnvelope {
-  schema?: string;
-  header?: FeishuEventHeader;
-  token?: string;
-  event?: FeishuMessageReceiveEvent;
 }
 
 interface FeishuConversationTarget {
@@ -128,7 +109,7 @@ export class FeishuBot {
   private feishuApi = new FeishuApiClient(this.feishuConfig);
   private readonly adapter = new FeishuAdapter(this.bridgeRuntime.router);
   private readonly recentMessageIds = new Map<string, number>();
-  private server?: Server;
+  private longConnection?: Lark.WSClient;
   private botOpenId?: string;
 
   async start(): Promise<void> {
@@ -136,41 +117,18 @@ export class FeishuBot {
     logSessionReconciliation("Feishu bot startup", sessionRefresh);
     await this.refreshFeishuClient();
     this.installSignalHandlers();
-
-    this.server = createServer((request, response) => {
-      void this.handleHttpRequest(request, response);
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      this.server?.once("error", reject);
-      this.server?.listen(this.feishuConfig.port, this.feishuConfig.host, () => {
-        resolve();
-      });
-    });
-
-    console.log(
-      `Feishu bot listening on http://${this.feishuConfig.host}:${this.feishuConfig.port}${this.feishuConfig.eventsPath}.`
-    );
+    await this.connectLongConnection();
+    console.log("Feishu bot started in long connection mode.");
   }
 
   async stop(): Promise<void> {
-    if (!this.server) {
+    if (!this.longConnection) {
       return;
     }
 
-    const activeServer = this.server;
-    this.server = undefined;
-
-    await new Promise<void>((resolve, reject) => {
-      activeServer.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve();
-      });
-    });
+    const activeConnection = this.longConnection;
+    this.longConnection = undefined;
+    activeConnection.close();
   }
 
   async refreshFeishuClient(): Promise<void> {
@@ -197,91 +155,45 @@ export class FeishuBot {
     }
   }
 
-  private async handleHttpRequest(
-    request: IncomingMessage,
-    response: ServerResponse
-  ): Promise<void> {
-    try {
-      const method = request.method ?? "GET";
-      const url = new URL(request.url ?? "/", "http://localhost");
+  private async connectLongConnection(): Promise<void> {
+    const previousConnection = this.longConnection;
+    this.longConnection = undefined;
+    previousConnection?.close();
 
-      if (method === "GET" && url.pathname === this.feishuConfig.healthPath) {
-        respondText(response, 200, "ok");
-        return;
-      }
+    const wsClient = new Lark.WSClient({
+      appId: this.feishuConfig.appId,
+      appSecret: this.feishuConfig.appSecret,
+      domain: buildFeishuSdkDomain(this.feishuConfig.apiBaseUrl),
+      loggerLevel: Lark.LoggerLevel.warn
+    });
 
-      if (method !== "POST" || url.pathname !== this.feishuConfig.eventsPath) {
-        respondText(response, 404, "Not found");
-        return;
-      }
+    this.longConnection = wsClient;
+    await wsClient.start({
+      eventDispatcher: new Lark.EventDispatcher({
+        loggerLevel: Lark.LoggerLevel.warn
+      }).register({
+        "im.message.receive_v1": (payload: FeishuMessageReceiveEvent) => {
+          this.handleIncomingLongConnectionEvent(payload);
+        }
+      })
+    });
+  }
 
-      const rawBody = await readRawBody(request);
-      await this.handleEventRequest(rawBody, response, request.headers);
-    } catch (error) {
+  private handleIncomingLongConnectionEvent(payload: FeishuMessageReceiveEvent): void {
+    const messageId = payload.message?.message_id;
+    if (!messageId || this.isDuplicateMessage(messageId)) {
+      return;
+    }
+
+    void this.handleMessageEvent(payload).catch((error) => {
       console.error(formatTopLevelError(error));
-
-      if (!response.headersSent) {
-        respondText(response, 500, "Feishu bridge failure");
-      } else {
-        response.end();
-      }
-    }
+    });
   }
 
-  private async handleEventRequest(
-    rawBody: Buffer,
-    response: ServerResponse,
-    headers: IncomingHttpHeaders = {}
-  ): Promise<void> {
-    const payload = this.parseEventRequest(rawBody, headers);
-
-    if (isUrlVerificationPayload(payload)) {
-      respondJson(response, 200, {
-        challenge: payload.challenge
-      });
-      return;
-    }
-
-    if (!isMessageReceiveEnvelope(payload)) {
-      respondText(response, 200, "ok");
-      return;
-    }
-
-    const message = payload.event?.message;
-    if (!message?.message_id || this.isDuplicateMessage(message.message_id)) {
-      respondText(response, 200, "ok");
-      return;
-    }
-
-    respondText(response, 200, "ok");
-    await this.handleMessageEvent(payload);
-  }
-
-  private parseEventRequest(rawBody: Buffer, headers: IncomingHttpHeaders): unknown {
-    const outer = JSON.parse(rawBody.toString("utf8")) as unknown;
-    let payload = outer;
-
-    if (
-      this.feishuConfig.encryptKey &&
-      isRecord(outer) &&
-      typeof outer.encrypt === "string"
-    ) {
-      payload = JSON.parse(decryptFeishuEvent(outer.encrypt, this.feishuConfig.encryptKey)) as unknown;
-    }
-
-    if (!isUrlVerificationPayload(payload) && this.feishuConfig.encryptKey) {
-      verifyFeishuSignature(headers, rawBody, this.feishuConfig.encryptKey);
-    }
-
-    verifyFeishuToken(payload, this.feishuConfig.verificationToken);
-    return payload;
-  }
-
-  private async handleMessageEvent(payload: FeishuEventEnvelope): Promise<void> {
-    const workspaceId = payload.header?.tenant_key ?? payload.event?.sender?.tenant_key ?? "unknown";
-    const event = payload.event;
-    const message = event?.message;
-    const sender = event?.sender;
+  private async handleMessageEvent(payload: FeishuMessageReceiveEvent): Promise<void> {
+    const workspaceId = payload.tenant_key ?? payload.sender?.tenant_key ?? "unknown";
+    const message = payload.message;
+    const sender = payload.sender;
 
     if (!message || !sender || sender.sender_type !== "user") {
       return;
@@ -494,32 +406,31 @@ export class FeishuBot {
               `- Repo count: ${snapshot.repositoryTargets.length}`,
               `- Allowed users configured: ${this.feishuConfig.allowedOpenIds.length || "all"}`,
               `- Admin users configured: ${this.feishuConfig.adminOpenIds.length}`,
-              `- Listening on: ${this.feishuConfig.host}:${this.feishuConfig.port}`,
-              `- Events path: ${this.feishuConfig.eventsPath}`,
+              "- Event delivery: long connection",
+              `- API base URL: ${this.feishuConfig.apiBaseUrl}`,
               `- Restart allowed: ${String(this.feishuConfig.allowProcessRestart)}`
             ].join("\n")
           );
           return;
         }
         case "reloadconfig": {
-          const previousHost = this.feishuConfig.host;
-          const previousPort = this.feishuConfig.port;
-          const previousEventsPath = this.feishuConfig.eventsPath;
+          const previousAppId = this.feishuConfig.appId;
+          const previousAppSecret = this.feishuConfig.appSecret;
+          const previousApiBaseUrl = this.feishuConfig.apiBaseUrl;
 
           const snapshot = this.bridgeRuntime.reloadRepositoryRegistry();
           const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
           this.feishuConfig = loadFeishuBotConfig();
           await this.refreshFeishuClient();
+          await this.connectLongConnection();
 
           const notes: string[] = [];
           if (
-            previousHost !== this.feishuConfig.host ||
-            previousPort !== this.feishuConfig.port
+            previousAppId !== this.feishuConfig.appId ||
+            previousAppSecret !== this.feishuConfig.appSecret ||
+            previousApiBaseUrl !== this.feishuConfig.apiBaseUrl
           ) {
-            notes.push("Listener host/port changes require a process restart.");
-          }
-          if (previousEventsPath !== this.feishuConfig.eventsPath) {
-            notes.push("Update the Feishu callback URL if the events path changed.");
+            notes.push("Feishu long connection settings changed and the client was restarted.");
           }
 
           await this.postConversationMessage(
@@ -532,6 +443,7 @@ export class FeishuBot {
               `- Repo count: ${snapshot.repositoryTargets.length}`,
               `- Allowed users configured: ${this.feishuConfig.allowedOpenIds.length || "all"}`,
               `- Admin users configured: ${this.feishuConfig.adminOpenIds.length}`,
+              "- Event delivery: long connection",
               ...formatSessionReconciliationLines(sessionRefresh),
               ...notes
             ].join("\n")
@@ -844,78 +756,6 @@ class FeishuApiClient {
   }
 }
 
-function isUrlVerificationPayload(value: unknown): value is FeishuVerificationPayload {
-  return (
-    isRecord(value) &&
-    value.type === "url_verification" &&
-    typeof value.challenge === "string"
-  );
-}
-
-function isMessageReceiveEnvelope(value: unknown): value is FeishuEventEnvelope {
-  return (
-    isRecord(value) &&
-    isRecord(value.header) &&
-    value.header.event_type === "im.message.receive_v1"
-  );
-}
-
-function verifyFeishuToken(value: unknown, verificationToken: string | undefined): void {
-  if (!verificationToken) {
-    return;
-  }
-
-  const token =
-    (isRecord(value) && typeof value.token === "string" ? value.token : undefined) ??
-    (isRecord(value) && isRecord(value.header) && typeof value.header.token === "string"
-      ? value.header.token
-      : undefined);
-
-  if (token !== verificationToken) {
-    throw new Error("Feishu verification token mismatch.");
-  }
-}
-
-function verifyFeishuSignature(
-  headers: IncomingHttpHeaders,
-  rawBody: Buffer,
-  encryptKey: string
-): void {
-  const timestamp = readSingleHeader(headers["x-lark-request-timestamp"]);
-  const nonce = readSingleHeader(headers["x-lark-request-nonce"]);
-  const signature = readSingleHeader(headers["x-lark-signature"]);
-
-  if (!timestamp || !nonce || !signature) {
-    throw new Error("Feishu signature headers are missing.");
-  }
-
-  const expected = createHash("sha256")
-    .update(timestamp + nonce + encryptKey)
-    .update(rawBody)
-    .digest("hex");
-  const actualBuffer = Buffer.from(signature, "utf8");
-  const expectedBuffer = Buffer.from(expected, "utf8");
-
-  if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) {
-    throw new Error("Invalid Feishu signature.");
-  }
-}
-
-function decryptFeishuEvent(encryptedPayload: string, encryptKey: string): string {
-  const decoded = Buffer.from(encryptedPayload, "base64");
-  if (decoded.length < 16) {
-    throw new Error("Feishu encrypted payload is too short.");
-  }
-
-  const iv = decoded.subarray(0, 16);
-  const ciphertext = decoded.subarray(16);
-  const key = createHash("sha256").update(encryptKey).digest();
-  const decipher = createDecipheriv("aes-256-cbc", key, iv);
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-
-  return decrypted.toString("utf8");
-}
-
 function buildBaseConversationTarget(
   workspaceId: string,
   message: FeishuMessageEventPayload
@@ -1207,54 +1047,16 @@ function joinFeishuApiUrl(baseUrl: string, resourcePath: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${resourcePath.replace(/^\/+/, "")}`;
 }
 
+function buildFeishuSdkDomain(apiBaseUrl: string): string {
+  return new URL(apiBaseUrl).origin;
+}
+
 function randomUuid(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null;
-}
-
-async function readRawBody(request: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-
-  for await (const chunk of request) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
-
-  return Buffer.concat(chunks);
-}
-
-function readSingleHeader(value: string | string[] | undefined): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value[0];
-  }
-
-  return undefined;
-}
-
-function respondText(
-  response: ServerResponse,
-  statusCode: number,
-  body: string
-): void {
-  response.statusCode = statusCode;
-  response.setHeader("content-type", "text/plain; charset=utf-8");
-  response.end(body);
-}
-
-function respondJson(
-  response: ServerResponse,
-  statusCode: number,
-  body: unknown
-): void {
-  response.statusCode = statusCode;
-  response.setHeader("content-type", "application/json; charset=utf-8");
-  response.end(JSON.stringify(body));
 }
 
 function buildFeishuAdminHelp(): string {

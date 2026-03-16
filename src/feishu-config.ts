@@ -3,7 +3,6 @@ import process from "node:process";
 import {
   loadNuntiusConfigFile,
   readBoolean,
-  readNumber,
   readString,
   readStringArray,
   readTable
@@ -12,12 +11,6 @@ import {
 export interface FeishuBotConfig {
   appId: string;
   appSecret: string;
-  verificationToken?: string;
-  encryptKey?: string;
-  host: string;
-  port: number;
-  eventsPath: string;
-  healthPath: string;
   allowedOpenIds: string[];
   adminOpenIds: string[];
   allowProcessRestart: boolean;
@@ -34,25 +27,6 @@ export function loadFeishuBotConfig(): FeishuBotConfig {
     appId: readString(feishuRecord, "app_id") ?? readRequiredEnvString("NUNTIUS_FEISHU_APP_ID"),
     appSecret:
       readString(feishuRecord, "app_secret") ?? readRequiredEnvString("NUNTIUS_FEISHU_APP_SECRET"),
-    verificationToken:
-      readString(feishuRecord, "verification_token") ??
-      readOptionalEnvString("NUNTIUS_FEISHU_VERIFICATION_TOKEN"),
-    encryptKey:
-      readString(feishuRecord, "encrypt_key") ??
-      readOptionalEnvString("NUNTIUS_FEISHU_ENCRYPT_KEY"),
-    host: readString(feishuRecord, "host") ?? process.env.NUNTIUS_FEISHU_HOST ?? "0.0.0.0",
-    port: parsePort(
-      readNumber(feishuRecord, "port"),
-      process.env.NUNTIUS_FEISHU_PORT
-    ),
-    eventsPath:
-      readString(feishuRecord, "events_path") ??
-      process.env.NUNTIUS_FEISHU_EVENTS_PATH ??
-      "/feishu/events",
-    healthPath:
-      readString(feishuRecord, "health_path") ??
-      process.env.NUNTIUS_FEISHU_HEALTH_PATH ??
-      "/healthz",
     allowedOpenIds:
       readStringArray(feishuRecord, "allowed_open_ids") ??
       readStringArray(feishuRecord, "allowed_user_ids") ??
@@ -72,39 +46,10 @@ export function loadFeishuBotConfig(): FeishuBotConfig {
   };
 }
 
-function parsePort(fileValue: number | undefined, envValue: string | undefined): number {
-  if (fileValue !== undefined) {
-    return ensurePort(fileValue, "feishu.port");
-  }
-
-  if (!envValue) {
-    return 8789;
-  }
-
-  return ensurePort(Number.parseInt(envValue, 10), "NUNTIUS_FEISHU_PORT");
-}
-
-function ensurePort(value: number, sourceName: string): number {
-  if (!Number.isInteger(value) || value <= 0 || value > 65_535) {
-    throw new Error(`${sourceName} must be an integer between 1 and 65535.`);
-  }
-
-  return value;
-}
-
 function readRequiredEnvString(key: string): string {
   const value = process.env[key];
   if (!value) {
     throw new Error(`${key} is required when it is not set in nuntius.toml.`);
-  }
-
-  return value;
-}
-
-function readOptionalEnvString(key: string): string | undefined {
-  const value = process.env[key];
-  if (!value) {
-    return undefined;
   }
 
   return value;

@@ -12,27 +12,16 @@ Minimal Feishu section:
 [feishu]
 app_id = "cli_xxxxxxxxxxxxxxxx"
 app_secret = "your-feishu-app-secret"
-verification_token = "your-feishu-verification-token"
 allowed_open_ids = ["ou_xxxxxxxxxxxxxxxx"]
 admin_open_ids = ["ou_xxxxxxxxxxxxxxxx"]
-```
-
-Recommended when you enable encrypted callbacks:
-
-```toml
-[feishu]
-encrypt_key = "your-feishu-encrypt-key"
 ```
 
 Optional:
 
 ```toml
 [feishu]
-host = "0.0.0.0"
-port = 8789
-events_path = "/feishu/events"
-health_path = "/healthz"
 allow_process_restart = false
+api_base_url = "https://open.feishu.cn/open-apis"
 ```
 
 For a reloadable repo registry, point the bridge at a TOML file:
@@ -46,7 +35,7 @@ Example format: [config/repository-registry.example.toml](/home/nomofu/nuntius/c
 
 ## Feishu App Setup
 
-Enable bot capability for the app, then publish a version after changing scopes or callbacks.
+Enable bot capability for the app, then publish a version after changing scopes or event settings.
 
 Recommended permissions:
 
@@ -58,11 +47,9 @@ Recommended permissions:
 Event subscription:
 
 - Subscribe to `im.message.receive_v1`
-- Configure callback mode as "Send notifications to developer's server"
-- Callback URL: `https://your-host.example.com/feishu/events`
-- Health check: `https://your-host.example.com/healthz`
-
-If you configure an `encrypt_key`, nuntius will decrypt encrypted payloads and verify signed event callbacks.
+- Configure subscription mode as "Receive events through long connection"
+- No callback URL or health check endpoint is required
+- Long connection mode only supports event subscriptions, which is sufficient for nuntius
 
 ## Run
 
@@ -70,6 +57,8 @@ If you configure an `encrypt_key`, nuntius will decrypt encrypted payloads and v
 npm run build
 npm run feishu:start
 ```
+
+The process only needs outbound network access to Feishu. You do not need a public HTTP endpoint or intranet tunneling.
 
 Or run all configured IM integrations together:
 
@@ -110,4 +99,4 @@ npm run start
 - Persistent work in a group is moved into a Feishu thread automatically; later replies in that thread reuse the same bound worker session.
 - `/codexadmin reloadconfig` reloads the bridge config and repository registry in-process.
 - `/codexadmin restart` only exits the process. Use systemd, Docker restart policy, or another supervisor to bring it back up.
-- Listener host/port and callback path changes still require updating the Feishu app configuration.
+- There is no Feishu callback URL to keep in sync because events are received over the SDK's long connection client.

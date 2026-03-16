@@ -1,4 +1,3 @@
-import { createCipheriv, createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,33 +6,32 @@ import assert from "node:assert/strict";
 
 import { FeishuBot } from "../dist/feishu-bot.js";
 
-test("encrypted url verification returns the challenge", async (t) => {
+test("duplicate long connection events are ignored", async (t) => {
   const harness = createHarness();
   t.after(() => harness.cleanup());
 
   const bot = new FeishuBot();
+  await bot.refreshFeishuClient();
 
-  const response = createResponseRecorder();
-  const encryptedBody = encryptFeishuPayload(
-    JSON.stringify({
-      challenge: "challenge-value",
-      token: "verify-token",
-      type: "url_verification"
-    }),
-    "encrypt-key"
-  );
+  harness.resetRecords();
 
-  await bot.handleEventRequest(
-    Buffer.from(
-      JSON.stringify({
-        encrypt: encryptedBody
-      })
-    ),
-    response
-  );
+  const event = buildMessageEvent({
+    eventId: "evt-dm-1",
+    messageId: "om-dm-1",
+    chatId: "oc-chat-dm-1",
+    chatType: "p2p",
+    text: "/codex help"
+  });
+  bot.handleIncomingLongConnectionEvent(event);
 
-  assert.equal(response.statusCode, 200);
-  assert.equal(response.body, JSON.stringify({ challenge: "challenge-value" }));
+  await waitFor(() => harness.records.length === 1);
+  assert.equal(harness.records[0].kind, "message.reply");
+
+  harness.resetRecords();
+  bot.handleIncomingLongConnectionEvent(event);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.deepEqual(harness.records, []);
 });
 
 test("group bind bootstraps a Feishu thread and thread replies reuse the worker session", async (t) => {
@@ -50,26 +48,17 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
 
   harness.resetRecords();
 
-  const bindResponse = createResponseRecorder();
-  const bindBody = Buffer.from(
-    JSON.stringify(
-      buildMessageEvent({
-        eventId: "evt-root-bind",
-        messageId: "om-root-1",
-        chatId: "oc-chat-1",
-        chatType: "group",
-        text: "/codex bind nuntius"
-      })
-    )
-  );
-  await bot.handleEventRequest(
-    bindBody,
-    bindResponse,
-    buildFeishuHeaders(bindBody, "encrypt-key")
+  bot.handleIncomingLongConnectionEvent(
+    buildMessageEvent({
+      eventId: "evt-root-bind",
+      messageId: "om-root-1",
+      chatId: "oc-chat-1",
+      chatType: "group",
+      text: "/codex bind nuntius"
+    })
   );
 
-  assert.equal(bindResponse.statusCode, 200);
-  assert.equal(bindResponse.body, "ok");
+  await waitFor(() => harness.records.length === 2);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
     ["message.reply", "message.reply"]
@@ -83,28 +72,19 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
 
   harness.resetRecords();
 
-  const firstReplyResponse = createResponseRecorder();
-  const firstReplyBody = Buffer.from(
-    JSON.stringify(
-      buildMessageEvent({
-        eventId: "evt-thread-1",
-        messageId: "om-thread-user-1",
-        rootId: "om-root-1",
-        threadId: "omt-thread-1",
-        chatId: "oc-chat-1",
-        chatType: "group",
-        text: "check the repo now"
-      })
-    )
-  );
-  await bot.handleEventRequest(
-    firstReplyBody,
-    firstReplyResponse,
-    buildFeishuHeaders(firstReplyBody, "encrypt-key")
+  bot.handleIncomingLongConnectionEvent(
+    buildMessageEvent({
+      eventId: "evt-thread-1",
+      messageId: "om-thread-user-1",
+      rootId: "om-root-1",
+      threadId: "omt-thread-1",
+      chatId: "oc-chat-1",
+      chatType: "group",
+      text: "check the repo now"
+    })
   );
 
-  assert.equal(firstReplyResponse.statusCode, 200);
-  assert.equal(firstReplyResponse.body, "ok");
+  await waitFor(() => harness.records.length === 4);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
     ["message.reply", "message.update", "message.update", "message.reply"]
@@ -122,28 +102,19 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
 
   harness.resetRecords();
 
-  const secondReplyResponse = createResponseRecorder();
-  const secondReplyBody = Buffer.from(
-    JSON.stringify(
-      buildMessageEvent({
-        eventId: "evt-thread-2",
-        messageId: "om-thread-user-2",
-        rootId: "om-root-1",
-        threadId: "omt-thread-1",
-        chatId: "oc-chat-1",
-        chatType: "group",
-        text: "summarize the changes"
-      })
-    )
-  );
-  await bot.handleEventRequest(
-    secondReplyBody,
-    secondReplyResponse,
-    buildFeishuHeaders(secondReplyBody, "encrypt-key")
+  bot.handleIncomingLongConnectionEvent(
+    buildMessageEvent({
+      eventId: "evt-thread-2",
+      messageId: "om-thread-user-2",
+      rootId: "om-root-1",
+      threadId: "omt-thread-1",
+      chatId: "oc-chat-1",
+      chatType: "group",
+      text: "summarize the changes"
+    })
   );
 
-  assert.equal(secondReplyResponse.statusCode, 200);
-  assert.equal(secondReplyResponse.body, "ok");
+  await waitFor(() => harness.records.length === 4);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
     ["message.reply", "message.update", "message.update", "message.reply"]
@@ -186,8 +157,6 @@ function createHarness() {
       "[feishu]",
       'app_id = "cli-test"',
       'app_secret = "secret-test"',
-      'verification_token = "verify-token"',
-      'encrypt_key = "encrypt-key"',
       'allowed_open_ids = ["ou-user-1"]',
       'admin_open_ids = ["ou-user-1"]'
     ].join("\n")
@@ -289,38 +258,33 @@ function createHarness() {
 
 function buildMessageEvent(input) {
   return {
-    schema: "2.0",
-    header: {
-      event_id: input.eventId,
-      event_type: "im.message.receive_v1",
-      create_time: "1710000000000",
-      token: "verify-token",
-      app_id: "cli-test",
+    event_id: input.eventId,
+    event_type: "im.message.receive_v1",
+    create_time: "1710000000000",
+    token: "verify-token",
+    app_id: "cli-test",
+    tenant_key: "tenant-1",
+    sender: {
+      sender_id: {
+        open_id: "ou-user-1"
+      },
+      sender_type: "user",
       tenant_key: "tenant-1"
     },
-    event: {
-      sender: {
-        sender_id: {
-          open_id: "ou-user-1"
-        },
-        sender_type: "user",
-        tenant_key: "tenant-1"
-      },
-      message: {
-        message_id: input.messageId,
-        root_id: input.rootId,
-        parent_id: input.rootId,
-        create_time: "1710000000000",
-        update_time: "1710000000000",
-        chat_id: input.chatId,
-        thread_id: input.threadId,
-        chat_type: input.chatType,
-        message_type: "text",
-        content: JSON.stringify({
-          text: input.text
-        }),
-        mentions: input.mentions ?? []
-      }
+    message: {
+      message_id: input.messageId,
+      root_id: input.rootId,
+      parent_id: input.rootId,
+      create_time: "1710000000000",
+      update_time: "1710000000000",
+      chat_id: input.chatId,
+      thread_id: input.threadId,
+      chat_type: input.chatType,
+      message_type: "text",
+      content: JSON.stringify({
+        text: input.text
+      }),
+      mentions: input.mentions ?? []
     }
   };
 }
@@ -371,45 +335,6 @@ function classifyFeishuFetch(method, pathName) {
   return "unexpected";
 }
 
-function createResponseRecorder() {
-  return {
-    body: "",
-    headers: {},
-    headersSent: false,
-    statusCode: 0,
-    setHeader(name, value) {
-      this.headers[name] = value;
-    },
-    end(body = "") {
-      this.body = String(body);
-      this.headersSent = true;
-    }
-  };
-}
-
-function encryptFeishuPayload(payload, encryptKey) {
-  const iv = Buffer.from("1234567890abcdef");
-  const key = createHash("sha256").update(encryptKey).digest();
-  const cipher = createCipheriv("aes-256-cbc", key, iv);
-  const encrypted = Buffer.concat([cipher.update(payload, "utf8"), cipher.final()]);
-  return Buffer.concat([iv, encrypted]).toString("base64");
-}
-
-function buildFeishuHeaders(rawBody, encryptKey) {
-  const timestamp = "1710000000";
-  const nonce = "nonce-1";
-  const signature = createHash("sha256")
-    .update(timestamp + nonce + encryptKey)
-    .update(rawBody)
-    .digest("hex");
-
-  return {
-    "x-lark-request-timestamp": timestamp,
-    "x-lark-request-nonce": nonce,
-    "x-lark-signature": signature
-  };
-}
-
 function jsonResponse(body) {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -425,4 +350,16 @@ function readInvocationLog(filePath) {
     .split("\n")
     .filter(Boolean)
     .map((line) => line.trim());
+}
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const startedAt = Date.now();
+
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error("Timed out waiting for Feishu bot activity.");
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
