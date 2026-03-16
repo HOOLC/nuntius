@@ -6,18 +6,23 @@ path = "/srv/repos/nuntius"
 sandbox_mode = "workspace-write"
 allow_channels = ["discord:123456789012345678:234567890123456789"]
 
-# Optional: enable Codex network access for this worker.
-# When enabled, networked tasks should keep cloned/downloaded artifacts inside
-# the dedicated workspace below instead of scattering them through the primary
-# repository. Host-level network policy must still allow outbound access or the
-# task will fail at runtime.
-# allow_codex_network_access = true
+# Codex network access is enabled by default for worker sessions.
+# nuntius explicitly requests web access by launching worker turns with
+# `codex --search`, and it derives a dedicated artifacts workspace under
+# `/tmp/nuntius-codex-network/<repo-id>` when no path is configured here.
+# Host-level network policy must still allow outbound access or the task will
+# fail at runtime with a clear warning.
+#
+# Optional: disable Codex network access for this repository.
+# allow_codex_network_access = false
+#
+# Optional: override the derived artifacts workspace.
 # codex_network_access_workspace_path = "/tmp/nuntius-network/nuntius"
 #
 # Optional: force a specific approval policy for worker shell commands.
 # approval_policy = "never"
 #
 # Optional: raw `codex -c key=value` overrides applied to the worker. Use this
-# to opt into supported Codex runtime capabilities such as sandbox permissions.
-# Exact keys and accepted values depend on the installed Codex CLI version.
-# codex_config_overrides = ['sandbox_permissions=["<network-permission-from-codex-cli>"]']
+# for other reviewed, per-target Codex settings. Web access does not require a
+# `-c` override; nuntius handles that via `codex --search`.
+# codex_config_overrides = ['shell_environment_policy.inherit="core"']

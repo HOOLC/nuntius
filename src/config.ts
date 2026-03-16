@@ -1,3 +1,4 @@
+import os from "node:os";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -237,13 +238,13 @@ function parseRepositoryTarget(
     "codex_config_overrides",
     "codexConfigOverrides"
   ]);
-  const allowCodexNetworkAccess = readOptionalBooleanFromKeys(value, [
+  const allowCodexNetworkAccessSetting = readOptionalBooleanFromKeys(value, [
     "allow_codex_network_access",
     "allowCodexNetworkAccess",
     "allow_external_repository_access",
     "allowExternalRepositoryAccess"
   ]);
-  const codexNetworkAccessWorkspacePath = resolveOptionalPath(
+  const explicitCodexNetworkAccessWorkspacePath = resolveOptionalPath(
     readOptionalStringFromKeys(value, [
       "codex_network_access_workspace_path",
       "codexNetworkAccessWorkspacePath",
@@ -254,14 +255,12 @@ function parseRepositoryTarget(
   );
   const allowUsers = readOptionalStringArrayFromKeys(value, ["allow_users", "allowUsers"]);
   const allowChannels = readOptionalStringArrayFromKeys(value, ["allow_channels", "allowChannels"]);
+  const allowCodexNetworkAccess = allowCodexNetworkAccessSetting ?? true;
+  const codexNetworkAccessWorkspacePath = allowCodexNetworkAccess
+    ? explicitCodexNetworkAccessWorkspacePath ?? deriveDefaultCodexNetworkAccessWorkspacePath(id)
+    : explicitCodexNetworkAccessWorkspacePath;
 
-  if (allowCodexNetworkAccess && !codexNetworkAccessWorkspacePath) {
-    throw new Error(
-      "codexNetworkAccessWorkspacePath is required when allowCodexNetworkAccess is enabled."
-    );
-  }
-
-  if (!allowCodexNetworkAccess && codexNetworkAccessWorkspacePath) {
+  if (!allowCodexNetworkAccess && explicitCodexNetworkAccessWorkspacePath) {
     throw new Error(
       "codexNetworkAccessWorkspacePath requires allowCodexNetworkAccess to be true."
     );
@@ -283,6 +282,15 @@ function parseRepositoryTarget(
     allowUsers,
     allowChannels
   };
+}
+
+function deriveDefaultCodexNetworkAccessWorkspacePath(repositoryId: string): string {
+  return path.join(os.tmpdir(), "nuntius-codex-network", sanitizePathComponent(repositoryId));
+}
+
+function sanitizePathComponent(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return sanitized.length > 0 ? sanitized : "repository";
 }
 
 function parseDataDocument(raw: string, sourceDescription: string): unknown {

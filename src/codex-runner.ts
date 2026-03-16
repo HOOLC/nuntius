@@ -15,6 +15,7 @@ export interface CodexTurnRequest {
   sessionId?: string;
   model?: string;
   approvalPolicy?: ApprovalPolicy;
+  searchEnabled?: boolean;
   addDirs?: string[];
   configOverrides?: string[];
   onEvent?: (event: CodexEvent) => void;
@@ -103,7 +104,8 @@ export class CodexRunner {
 }
 
 function buildNewSessionArgs(request: CodexTurnRequest): string[] {
-  const args = ["exec", "--json", "--skip-git-repo-check", "-C", request.repositoryPath];
+  const args = buildCommandPrefix(request);
+  args.push("exec", "--json", "--skip-git-repo-check", "-C", request.repositoryPath);
 
   if (request.model) {
     args.push("-m", request.model);
@@ -120,7 +122,8 @@ function buildResumeArgs(request: CodexTurnRequest): string[] {
     throw new Error("sessionId is required when resuming a Codex turn.");
   }
 
-  const args = ["exec", "resume", "--json", "--skip-git-repo-check"];
+  const args = buildCommandPrefix(request);
+  args.push("exec", "resume", "--json", "--skip-git-repo-check");
 
   if (request.model) {
     args.push("-m", request.model);
@@ -128,6 +131,17 @@ function buildResumeArgs(request: CodexTurnRequest): string[] {
 
   appendConfigArgs(args, request);
   args.push(request.sessionId, request.prompt);
+  return args;
+}
+
+function buildCommandPrefix(request: CodexTurnRequest): string[] {
+  const args: string[] = [];
+
+  if (request.searchEnabled) {
+    // `--search` is a top-level Codex flag and must appear before `exec`.
+    args.push("--search");
+  }
+
   return args;
 }
 

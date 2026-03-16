@@ -4,6 +4,9 @@ import type {
   InboundTurn,
   OutboundMessage
 } from "../domain.js";
+import {
+  buildCodexNetworkAccessStartNote
+} from "../codex-network-access.js";
 import type { InteractionRouter } from "../interaction-router.js";
 import type { TurnPublisher } from "../service.js";
 
@@ -72,6 +75,7 @@ class DiscordPublisher implements TurnPublisher {
           note,
           `Repository: \`${activeRepository.repositoryId}\``,
           `Sandbox: \`${activeRepository.sandboxMode}\``,
+          buildCodexNetworkAccessStartNote(activeRepository),
           activeRepository.workerSessionId
             ? `Worker session: \`${activeRepository.workerSessionId}\``
             : undefined

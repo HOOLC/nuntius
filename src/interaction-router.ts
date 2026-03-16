@@ -1,3 +1,4 @@
+import { formatCodexNetworkAccess as formatCodexNetworkAccessLabel } from "./codex-network-access.js";
 import type { InboundTurn } from "./domain.js";
 import type { CodexBridgeService, ConversationStatus, TurnPublisher } from "./service.js";
 
@@ -205,9 +206,5 @@ function formatCodexNetworkAccess(binding: {
   allowCodexNetworkAccess?: boolean;
   codexNetworkAccessWorkspacePath?: string;
 } | undefined): string {
-  if (!binding?.allowCodexNetworkAccess || !binding.codexNetworkAccessWorkspacePath) {
-    return "disabled";
-  }
-
-  return `enabled (${binding.codexNetworkAccessWorkspacePath})`;
+  return formatCodexNetworkAccessLabel(binding);
 }

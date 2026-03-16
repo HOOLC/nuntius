@@ -225,21 +225,24 @@ Use a configured registry of allowed repositories:
     "id": "nuntius",
     "path": "/srv/repos/nuntius",
     "sandboxMode": "workspace-write",
-    "allowCodexNetworkAccess": true,
     "codexNetworkAccessWorkspacePath": "/tmp/nuntius-network/nuntius",
     "approvalPolicy": "never",
-    "codexConfigOverrides": ["sandbox_permissions=[\"<network-permission-from-codex-cli>\"]"],
     "allowChannels": ["slack:T123:C456", "discord:G123:C999"]
   }
 ]
 ```
+
+Unless a repository explicitly disables it, nuntius launches worker turns with `codex --search`
+and derives a dedicated artifacts workspace when none is configured. If the host Codex runtime
+or OS policy still blocks outbound access, the worker should fail explicitly instead of silently
+acting as if the web request succeeded.
 
 Rules:
 
 - the handler may mention only configured repository IDs
 - the bridge enforces channel and user access checks
 - the handler workspace should default to `read-only`
-- Codex network access should be opt-in per target and use a dedicated workspace for fetched artifacts
+- Codex network access should use a dedicated workspace for fetched artifacts and remain disableable per target
 - Codex CLI overrides for networked worker tasks should be explicit and reviewed per target
 - `danger-full-access` should be isolated to separate admin-only repository targets
 

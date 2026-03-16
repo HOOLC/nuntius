@@ -4,6 +4,7 @@ import type {
   InboundTurn,
   OutboundMessage
 } from "../domain.js";
+import { buildCodexNetworkAccessStartNote } from "../codex-network-access.js";
 import type { InteractionRouter } from "../interaction-router.js";
 import type { TurnPublisher } from "../service.js";
 
@@ -73,7 +74,8 @@ class SlackPublisher implements TurnPublisher {
           note,
           `Running worker Codex against \`${activeRepository.repositoryId}\` (${activeRepository.sandboxMode})${
             activeRepository.workerSessionId ? ` session=${activeRepository.workerSessionId}` : ""
-          }.`
+          }.`,
+          buildCodexNetworkAccessStartNote(activeRepository)
         ]
           .filter(Boolean)
           .join("\n")

@@ -1,6 +1,7 @@
 import process from "node:process";
 import readline from "node:readline";
 
+import { formatCodexNetworkAccess } from "./codex-network-access.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
 import type { ConversationBinding, InboundTurn, OutboundMessage } from "./domain.js";
 import { CodexBridgeService, type ConversationStatus, type TurnPublisher } from "./service.js";
@@ -198,14 +199,7 @@ function printConversationStatus(status: ConversationStatus): void {
   console.log(`- handler session: ${status.binding?.handlerSessionId ?? "none"}`);
   console.log(`- bound repo: ${status.binding?.activeRepository?.repositoryId ?? "none"}`);
   console.log(`- worker session: ${status.binding?.activeRepository?.workerSessionId ?? "none"}`);
-  console.log(
-    `- Codex network access: ${
-      status.binding?.activeRepository?.allowCodexNetworkAccess &&
-      status.binding.activeRepository.codexNetworkAccessWorkspacePath
-        ? `enabled (${status.binding.activeRepository.codexNetworkAccessWorkspacePath})`
-        : "disabled"
-    }`
-  );
+  console.log(`- Codex network access: ${formatCodexNetworkAccess(status.binding?.activeRepository)}`);
   console.log(
     `- available repos: ${
       status.availableRepositories.map((repository) => repository.id).join(", ") || "none"
@@ -225,9 +219,12 @@ class ConsolePublisher implements TurnPublisher {
   ): Promise<void> {
     const repositoryId = binding.activeRepository?.repositoryId ?? "none";
     const workerSessionId = binding.activeRepository?.workerSessionId ?? "new";
+    const networkAccess = binding.activeRepository
+      ? formatCodexNetworkAccess(binding.activeRepository)
+      : "disabled";
     const prefix = note ? `${note}\n` : "";
     console.log(
-      `[worker] ${prefix}repo=${repositoryId} worker_session=${workerSessionId}`
+      `[worker] ${prefix}repo=${repositoryId} worker_session=${workerSessionId} network_access=${networkAccess}`
     );
   }
 

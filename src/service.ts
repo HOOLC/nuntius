@@ -2,6 +2,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import type { BridgeConfig, RepositoryTarget } from "./config.js";
+import {
+  buildCodexNetworkAccessFailureMessage,
+  hasCodexNetworkAccess
+} from "./codex-network-access.js";
 import type {
   CodexEvent,
   ConversationBinding,
@@ -290,7 +294,7 @@ export class CodexBridgeService {
       announceTurnStart: false
     });
 
-    if (worker.allowCodexNetworkAccess && worker.codexNetworkAccessWorkspacePath) {
+    if (hasCodexNetworkAccess(worker)) {
       await fs.mkdir(worker.codexNetworkAccessWorkspacePath, { recursive: true });
     }
 
@@ -304,12 +308,19 @@ export class CodexBridgeService {
         sessionId: worker.workerSessionId,
         model: worker.model,
         approvalPolicy: worker.approvalPolicy,
+        searchEnabled: hasCodexNetworkAccess(worker),
         addDirs: listWorkerAddDirs(worker),
         configOverrides: worker.codexConfigOverrides,
         onEvent: (event) => {
           progress.onEvent(event);
         }
       });
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(buildCodexNetworkAccessFailureMessage(worker, error.message));
+      }
+
+      throw error;
     } finally {
       await progress.stop();
     }
@@ -514,16 +525,17 @@ function clipMessage(text: string, maxChars: number): OutboundMessage {
 }
 
 function buildWorkerPrompt(binding: RepositoryBinding, workerPrompt: string): string {
-  if (!binding.allowCodexNetworkAccess || !binding.codexNetworkAccessWorkspacePath) {
+  if (!hasCodexNetworkAccess(binding)) {
     return workerPrompt;
   }
 
   return [
     "Worker execution context:",
     `- Primary repository path: ${binding.repositoryPath}`,
-    "- Codex network access is enabled for this worker session.",
+    "- nuntius requested web access for this worker session by launching Codex with `--search`.",
     `- Use this workspace for cloned or downloaded artifacts that do not belong in the primary repository: ${binding.codexNetworkAccessWorkspacePath}`,
     "- Network-dependent commands may still fail if the host Codex runtime or OS policy blocks outbound access.",
+    "- If outbound access is unavailable, stop and report the failure clearly instead of claiming you fetched remote data.",
     "",
     "User task:",
     workerPrompt
@@ -531,7 +543,7 @@ function buildWorkerPrompt(binding: RepositoryBinding, workerPrompt: string): st
 }
 
 function listWorkerAddDirs(binding: RepositoryBinding): string[] | undefined {
-  if (!binding.allowCodexNetworkAccess || !binding.codexNetworkAccessWorkspacePath) {
+  if (!hasCodexNetworkAccess(binding)) {
     return undefined;
   }
 
