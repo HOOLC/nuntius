@@ -9,6 +9,7 @@ import {
 import type {
   CodexEvent,
   ConversationBinding,
+  HandlerSessionBinding,
   InboundTurn,
   OutboundMessage,
   RepositoryBinding
@@ -17,7 +18,6 @@ import { conversationKeyToId, toConversationKey } from "./domain.js";
 import type { CodexRunner } from "./codex-runner.js";
 import {
   buildHandlerUserPrompt,
-  buildWorkerResultPrompt,
   parseHandlerDecision,
   type HandlerDecision
 } from "./handler-protocol.js";
@@ -35,6 +35,14 @@ export interface TurnPublisher {
 export interface ConversationStatus {
   binding?: ConversationBinding;
   availableRepositories: RepositoryTarget[];
+}
+
+export interface SessionReconciliationResult {
+  totalBindings: number;
+  updatedBindings: number;
+  clearedHandlerSessions: number;
+  clearedWorkerSessions: number;
+  droppedRepositoryBindings: number;
 }
 
 interface HandlerRunResult {
@@ -60,7 +68,21 @@ export class CodexBridgeService {
 
     await this.queue.run(conversationId, async () => {
       try {
-        let binding = (await this.sessionStore.get(conversationKey)) ?? createConversationBinding(turn);
+        const storedBinding =
+          (await this.sessionStore.get(conversationKey)) ?? createConversationBinding(turn);
+        let binding = this.refreshBindingForTurn(turn, storedBinding);
+
+        if (binding !== storedBinding) {
+          await this.sessionStore.upsert(binding);
+        }
+
+        if (binding.activeRepository) {
+          const outcome = await this.completeWorkerTurn(turn, binding, turn.text, publisher);
+          await this.sessionStore.upsert(outcome.binding);
+          await publisher.publishCompleted(turn, outcome.finalMessage);
+          return;
+        }
+
         let finalMessage: OutboundMessage | undefined;
 
         for (let step = 0; step < this.config.maxHandlerStepsPerTurn; step += 1) {
@@ -91,11 +113,56 @@ export class CodexBridgeService {
     });
   }
 
+  async reconcileSessionBindings(): Promise<SessionReconciliationResult> {
+    const bindings = await this.sessionStore.list();
+    const summary: SessionReconciliationResult = {
+      totalBindings: bindings.length,
+      updatedBindings: 0,
+      clearedHandlerSessions: 0,
+      clearedWorkerSessions: 0,
+      droppedRepositoryBindings: 0
+    };
+
+    for (const binding of bindings) {
+      const reconciled = await this.queue.run(
+        conversationKeyToId(binding.key),
+        async () => {
+          const current = await this.sessionStore.get(binding.key);
+          if (!current) {
+            return undefined;
+          }
+
+          const next = this.reconcileBindingWithCurrentConfig(current);
+          if (next.changed) {
+            await this.sessionStore.upsert(next.binding);
+          }
+
+          return next;
+        }
+      );
+
+      if (!reconciled) {
+        continue;
+      }
+
+      if (!reconciled.changed) {
+        continue;
+      }
+
+      summary.updatedBindings += 1;
+      summary.clearedHandlerSessions += reconciled.clearedHandlerSessions;
+      summary.clearedWorkerSessions += reconciled.clearedWorkerSessions;
+      summary.droppedRepositoryBindings += reconciled.droppedRepositoryBindings;
+    }
+
+    return summary;
+  }
+
   async resetConversation(turn: InboundTurn): Promise<void> {
     await this.resetState(turn, "all");
   }
 
-  async resetState(turn: InboundTurn, scope: "worker" | "binding" | "all"): Promise<void> {
+  async resetState(turn: InboundTurn, scope: "worker" | "binding" | "context" | "all"): Promise<void> {
     const conversationKey = toConversationKey(turn);
     const conversationId = conversationKeyToId(conversationKey);
 
@@ -120,8 +187,9 @@ export class CodexBridgeService {
 
     return this.queue.run(conversationId, async () => {
       const existing = (await this.sessionStore.get(conversationKey)) ?? createConversationBinding(turn);
+      const refreshed = this.refreshHandlerSessionBinding(existing);
       const repository = this.resolveRepository(turn, repositoryId);
-      const binding = bindRepository(existing, repository);
+      const binding = bindRepository(refreshed, repository);
 
       await this.sessionStore.upsert(binding);
       return binding;
@@ -138,26 +206,18 @@ export class CodexBridgeService {
   private async runHandlerTurn(
     turn: InboundTurn,
     binding: ConversationBinding,
-    publisher: TurnPublisher,
-    workerFeedback?: { workerPrompt: string; workerOutput: string }
+    publisher: TurnPublisher
   ): Promise<HandlerRunResult> {
-    const prompt = workerFeedback
-      ? buildWorkerResultPrompt({
-          turn,
-          state: binding,
-          workerPrompt: workerFeedback.workerPrompt,
-          workerOutput: workerFeedback.workerOutput
-        })
-      : buildHandlerUserPrompt({
-          turn,
-          state: binding,
-          availableRepositories: this.listAccessibleRepositories(turn),
-          requireExplicitRepositorySelection: this.config.requireExplicitRepositorySelection
-        });
+    const prompt = buildHandlerUserPrompt({
+      turn,
+      state: binding,
+      availableRepositories: this.listAccessibleRepositories(turn),
+      requireExplicitRepositorySelection: this.config.requireExplicitRepositorySelection
+    });
 
     const progress = new CodexRunProgressReporter(turn, publisher, {
       actor: "handler",
-      announceTurnStart: !workerFeedback
+      announceTurnStart: true
     });
 
     let result;
@@ -181,6 +241,7 @@ export class CodexBridgeService {
       binding: {
         ...binding,
         handlerSessionId: result.sessionId ?? binding.handlerSessionId,
+        handlerConfig: buildHandlerSessionConfig(this.config),
         updatedAt: new Date().toISOString()
       },
       decision: parseHandlerDecision(result.responseText)
@@ -213,23 +274,13 @@ export class CodexBridgeService {
           };
         }
 
-        await publisher.publishStarted(turn, nextBinding, decision.message);
-        const workerResult = await this.runWorkerTurn(
+        return this.completeWorkerTurn(
           turn,
           nextBinding,
           decision.continueWithWorkerPrompt,
-          publisher
+          publisher,
+          decision.message
         );
-        nextBinding = workerResult.binding;
-        await this.sessionStore.upsert(nextBinding);
-
-        const followUp = await this.runHandlerTurn(turn, nextBinding, publisher, {
-          workerPrompt: decision.continueWithWorkerPrompt,
-          workerOutput: workerResult.output
-        });
-        await this.sessionStore.upsert(followUp.binding);
-
-        return this.applyHandlerDecision(turn, followUp.binding, followUp.decision, publisher);
       }
       case "delegate": {
         if (!binding.activeRepository) {
@@ -242,23 +293,15 @@ export class CodexBridgeService {
           };
         }
 
-        const currentBinding = this.refreshActiveRepositoryBinding(turn, binding);
-        await this.sessionStore.upsert(currentBinding);
-        await publisher.publishStarted(turn, currentBinding, decision.message);
-        const workerResult = await this.runWorkerTurn(
+        // Keep accepting legacy delegate decisions from existing handler sessions, but route
+        // the user-facing reply straight from the worker output.
+        return this.completeWorkerTurn(
           turn,
-          currentBinding,
+          binding,
           decision.workerPrompt,
-          publisher
+          publisher,
+          decision.message
         );
-        await this.sessionStore.upsert(workerResult.binding);
-        const followUp = await this.runHandlerTurn(turn, workerResult.binding, publisher, {
-          workerPrompt: decision.workerPrompt,
-          workerOutput: workerResult.output
-        });
-        await this.sessionStore.upsert(followUp.binding);
-
-        return this.applyHandlerDecision(turn, followUp.binding, followUp.decision, publisher);
       }
       case "reset":
         return {
@@ -274,6 +317,25 @@ export class CodexBridgeService {
           finalMessage: clipMessage("Unsupported handler decision.", this.config.maxResponseChars)
         };
     }
+  }
+
+  private async completeWorkerTurn(
+    turn: InboundTurn,
+    binding: ConversationBinding,
+    workerPrompt: string,
+    publisher: TurnPublisher,
+    note?: string
+  ): Promise<{ binding: ConversationBinding; finalMessage: OutboundMessage }> {
+    const currentBinding = this.refreshActiveRepositoryBinding(turn, binding);
+    await this.sessionStore.upsert(currentBinding);
+    await publisher.publishStarted(turn, currentBinding, note);
+
+    const workerResult = await this.runWorkerTurn(turn, currentBinding, workerPrompt, publisher);
+
+    return {
+      binding: workerResult.binding,
+      finalMessage: clipMessage(buildWorkerReply(workerResult.output), this.config.maxResponseChars)
+    };
   }
 
   private async runWorkerTurn(
@@ -383,7 +445,7 @@ export class CodexBridgeService {
 
     return [
       "No repository is bound to this conversation.",
-      "Ask to bind a repository first or mention the repository explicitly so the handler can bind it.",
+      "Use `/codex bind <repo-id>` to bind one first, or mention the repository explicitly so the handler can bind it.",
       `Available repositories: ${available.join(", ")}.`
     ].join(" ");
   }
@@ -393,10 +455,88 @@ export class CodexBridgeService {
     binding: ConversationBinding
   ): ConversationBinding {
     if (!binding.activeRepository) {
+      return this.refreshHandlerSessionBinding(binding);
+    }
+
+    return refreshRepositoryBinding(
+      this.refreshHandlerSessionBinding(binding),
+      this.resolveRepository(turn, binding.activeRepository.repositoryId)
+    );
+  }
+
+  private refreshBindingForTurn(
+    turn: InboundTurn,
+    binding: ConversationBinding
+  ): ConversationBinding {
+    if (!binding.activeRepository) {
+      return this.refreshHandlerSessionBinding(binding);
+    }
+
+    return this.refreshActiveRepositoryBinding(turn, binding);
+  }
+
+  private refreshHandlerSessionBinding(binding: ConversationBinding): ConversationBinding {
+    const nextHandlerConfig = buildHandlerSessionConfig(this.config);
+    const shouldKeepSession = shouldReuseHandlerSession(binding.handlerConfig, nextHandlerConfig);
+    const nextHandlerSessionId = shouldKeepSession ? binding.handlerSessionId : undefined;
+    const shouldTrackConfig = Boolean(nextHandlerSessionId) || Boolean(binding.handlerConfig);
+    const nextHandlerConfigValue = shouldTrackConfig ? nextHandlerConfig : binding.handlerConfig;
+
+    if (
+      binding.handlerSessionId === nextHandlerSessionId &&
+      handlerSessionConfigsEqual(binding.handlerConfig, nextHandlerConfigValue)
+    ) {
       return binding;
     }
 
-    return bindRepository(binding, this.resolveRepository(turn, binding.activeRepository.repositoryId));
+    return {
+      ...binding,
+      handlerSessionId: nextHandlerSessionId,
+      handlerConfig: nextHandlerConfigValue,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  private reconcileBindingWithCurrentConfig(binding: ConversationBinding): {
+    binding: ConversationBinding;
+    changed: boolean;
+    clearedHandlerSessions: number;
+    clearedWorkerSessions: number;
+    droppedRepositoryBindings: number;
+  } {
+    const originalHandlerSessionId = binding.handlerSessionId;
+    const originalWorkerSessionId = binding.activeRepository?.workerSessionId;
+    const originalRepositoryId = binding.activeRepository?.repositoryId;
+
+    let nextBinding = this.refreshHandlerSessionBinding(binding);
+
+    if (nextBinding.activeRepository) {
+      const repository = this.resolveRepositoryById(nextBinding.activeRepository.repositoryId);
+
+      if (repository) {
+        nextBinding = refreshRepositoryBinding(nextBinding, repository);
+      } else {
+        nextBinding = {
+          ...nextBinding,
+          activeRepository: undefined,
+          updatedAt: new Date().toISOString()
+        };
+      }
+    }
+
+    return {
+      binding: nextBinding,
+      changed: nextBinding !== binding,
+      clearedHandlerSessions: originalHandlerSessionId && !nextBinding.handlerSessionId ? 1 : 0,
+      clearedWorkerSessions:
+        Boolean(originalWorkerSessionId) && !nextBinding.activeRepository?.workerSessionId ? 1 : 0,
+      droppedRepositoryBindings:
+        Boolean(originalRepositoryId) && !nextBinding.activeRepository ? 1 : 0
+    };
+  }
+
+  private resolveRepositoryById(repositoryId: string): RepositoryTarget | undefined {
+    return this.config.repositoryTargets.find((candidate) => candidate.id === repositoryId);
   }
 }
 
@@ -414,10 +554,43 @@ function bindRepository(
   binding: ConversationBinding,
   repository: RepositoryTarget
 ): ConversationBinding {
-  const previous = binding.activeRepository;
   const now = new Date().toISOString();
 
-  const activeRepository: RepositoryBinding = {
+  return {
+    ...binding,
+    activeRepository: deriveRepositoryBinding(binding.activeRepository, repository, now),
+    updatedAt: now
+  };
+}
+
+function refreshRepositoryBinding(
+  binding: ConversationBinding,
+  repository: RepositoryTarget
+): ConversationBinding {
+  const nextActiveRepository = deriveRepositoryBinding(
+    binding.activeRepository,
+    repository,
+    binding.activeRepository?.updatedAt ?? binding.updatedAt
+  );
+
+  if (repositoryBindingsEquivalent(binding.activeRepository, nextActiveRepository)) {
+    return binding;
+  }
+
+  const now = new Date().toISOString();
+  return {
+    ...binding,
+    activeRepository: deriveRepositoryBinding(binding.activeRepository, repository, now),
+    updatedAt: now
+  };
+}
+
+function deriveRepositoryBinding(
+  previous: RepositoryBinding | undefined,
+  repository: RepositoryTarget,
+  updatedAt: string
+): RepositoryBinding {
+  return {
     repositoryId: repository.id,
     repositoryPath: repository.path,
     sandboxMode: repository.sandboxMode,
@@ -427,13 +600,7 @@ function bindRepository(
     allowCodexNetworkAccess: Boolean(repository.allowCodexNetworkAccess),
     codexNetworkAccessWorkspacePath: repository.codexNetworkAccessWorkspacePath,
     workerSessionId: shouldReuseWorkerSession(previous, repository) ? previous?.workerSessionId : undefined,
-    updatedAt: now
-  };
-
-  return {
-    ...binding,
-    activeRepository,
-    updatedAt: now
+    updatedAt
   };
 }
 
@@ -457,9 +624,56 @@ function shouldReuseWorkerSession(
   );
 }
 
+function repositoryBindingsEquivalent(
+  left: RepositoryBinding | undefined,
+  right: RepositoryBinding | undefined
+): boolean {
+  return (
+    left?.repositoryId === right?.repositoryId &&
+    left?.repositoryPath === right?.repositoryPath &&
+    left?.sandboxMode === right?.sandboxMode &&
+    left?.model === right?.model &&
+    left?.approvalPolicy === right?.approvalPolicy &&
+    Boolean(left?.allowCodexNetworkAccess) === Boolean(right?.allowCodexNetworkAccess) &&
+    left?.codexNetworkAccessWorkspacePath === right?.codexNetworkAccessWorkspacePath &&
+    left?.workerSessionId === right?.workerSessionId &&
+    arraysEqual(left?.codexConfigOverrides, right?.codexConfigOverrides)
+  );
+}
+
+function buildHandlerSessionConfig(config: BridgeConfig): HandlerSessionBinding {
+  return {
+    workspacePath: config.handlerWorkspacePath,
+    sandboxMode: config.handlerSandboxMode,
+    model: config.handlerModel
+  };
+}
+
+function shouldReuseHandlerSession(
+  previous: HandlerSessionBinding | undefined,
+  current: HandlerSessionBinding
+): boolean {
+  if (!previous) {
+    return false;
+  }
+
+  return handlerSessionConfigsEqual(previous, current);
+}
+
+function handlerSessionConfigsEqual(
+  left: HandlerSessionBinding | undefined,
+  right: HandlerSessionBinding | undefined
+): boolean {
+  return (
+    left?.workspacePath === right?.workspacePath &&
+    left?.sandboxMode === right?.sandboxMode &&
+    left?.model === right?.model
+  );
+}
+
 function resetBinding(
   binding: ConversationBinding,
-  scope: "worker" | "binding" | "all"
+  scope: "worker" | "binding" | "context" | "all"
 ): ConversationBinding {
   const now = new Date().toISOString();
 
@@ -467,6 +681,7 @@ function resetBinding(
     return {
       ...binding,
       handlerSessionId: undefined,
+      handlerConfig: undefined,
       activeRepository: undefined,
       updatedAt: now
     };
@@ -476,6 +691,22 @@ function resetBinding(
     return {
       ...binding,
       activeRepository: undefined,
+      updatedAt: now
+    };
+  }
+
+  if (scope === "context") {
+    return {
+      ...binding,
+      handlerSessionId: undefined,
+      handlerConfig: undefined,
+      activeRepository: binding.activeRepository
+        ? {
+            ...binding.activeRepository,
+            workerSessionId: undefined,
+            updatedAt: now
+          }
+        : undefined,
       updatedAt: now
     };
   }
@@ -493,12 +724,14 @@ function resetBinding(
   };
 }
 
-function buildResetMessage(scope: "worker" | "binding" | "all"): string {
+function buildResetMessage(scope: "worker" | "binding" | "context" | "all"): string {
   switch (scope) {
     case "worker":
       return "Cleared the worker Codex session for this thread.";
     case "binding":
       return "Cleared the repository binding for this thread.";
+    case "context":
+      return "Cleared Codex context for this thread and kept the current repository binding.";
     case "all":
       return "Cleared the handler session and repository binding for this thread.";
   }
@@ -509,6 +742,10 @@ function touchBinding(binding: ConversationBinding): ConversationBinding {
     ...binding,
     updatedAt: new Date().toISOString()
   };
+}
+
+function buildWorkerReply(output: string): string {
+  return output.trim() ? output : "Codex completed the requested work.";
 }
 
 function clipMessage(text: string, maxChars: number): OutboundMessage {

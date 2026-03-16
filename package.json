@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "discord:register": "node dist/register-discord-commands.js",
     "discord:start": "node dist/discord-bot.js",
+    "feishu:start": "node dist/feishu-bot.js",
     "im:local": "node dist/local-im-cli.js",
     "slack:start": "node dist/slack-bot.js",
     "test": "npm run build && node --test test/*.test.mjs",

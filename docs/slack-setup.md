@@ -76,6 +76,13 @@ npm run build
 npm run slack:start
 ```
 
+Or run all configured IM integrations together:
+
+```bash
+npm run build
+npm run start
+```
+
 ## Supported Slack Flows
 
 ### Slash Commands
@@ -107,6 +114,7 @@ npm run slack:start
 - Slash-command status/help/reset replies are ephemeral, similar to the Discord interaction flow.
 - Slash-command ask/bind in a normal channel creates a dedicated Slack thread starter message first.
 - Channel mentions start Codex inside a thread rooted on the user's message.
+- Once a thread is bound to a repo, later replies in that thread go straight to the bound worker session until `/codex bind` or `/codex reset` changes the state.
 - Worker progress stays in one updateable Slack status message where possible instead of spamming the thread.
 - `reloadconfig` reloads the bridge config and repository registry in-process.
 - `restart` only exits the current process. Use systemd, Docker restart policy, or another supervisor to bring it back up.

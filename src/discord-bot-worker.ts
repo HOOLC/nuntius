@@ -20,6 +20,12 @@ import {
 import { DiscordAdapter } from "./adapters/discord.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
 import { loadDiscordBotConfig } from "./discord-config.js";
+import {
+  sendDiscordInteractionResponse,
+  sendDiscordText,
+  type DiscordInteractionDeliveryState,
+  type DiscordSendableChannel
+} from "./discord-delivery.js";
 import type { Attachment } from "./domain.js";
 import {
   isSupervisorToWorkerMessage,
@@ -27,7 +33,6 @@ import {
   type WorkerToSupervisorMessage
 } from "./discord-supervisor-protocol.js";
 
-const DISCORD_MESSAGE_LIMIT = 1900;
 const DM_WORKSPACE_ID = "dm";
 const BRIDGE_PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BUILD_OUTPUT_LINE_LIMIT = 40;
@@ -39,11 +44,6 @@ interface ConversationTarget {
   threadId?: string;
   scope: "dm" | "thread";
   outputChannel: DiscordSendableChannel;
-}
-
-interface DiscordSendableChannel {
-  send(content: string): Promise<unknown>;
-  sendTyping?(): Promise<void>;
 }
 
 class DiscordBotWorker {
@@ -62,6 +62,9 @@ class DiscordBotWorker {
   private stopped = false;
 
   async start(): Promise<void> {
+    const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
+    logSessionReconciliation("Discord worker startup", sessionRefresh);
+
     this.client.once(Events.ClientReady, (client) => {
       console.log(`Discord bot connected as ${client.user.tag}.`);
       sendWorkerMessage({
@@ -181,6 +184,7 @@ class DiscordBotWorker {
         case "reloadconfig": {
           const snapshot = this.bridgeRuntime.reloadRepositoryRegistry();
           this.discordConfig = loadDiscordBotConfig();
+          const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
           await replyEphemeral(
             interaction,
             [
@@ -190,7 +194,8 @@ class DiscordBotWorker {
               `- Default repo: ${snapshot.defaultRepositoryId}`,
               `- Repo count: ${snapshot.repositoryTargets.length}`,
               `- Allowed users configured: ${this.discordConfig.allowedUserIds.length || "all"}`,
-              `- Admin users configured: ${this.discordConfig.adminUserIds.length}`
+              `- Admin users configured: ${this.discordConfig.adminUserIds.length}`,
+              ...formatSessionReconciliationLines(sessionRefresh)
             ].join("\n")
           );
           return;
@@ -198,12 +203,28 @@ class DiscordBotWorker {
         case "hotreload":
           await replyEphemeral(
             interaction,
-            "Rebuilding the bridge now. If the build succeeds, I will request a hot reload next."
+            "Rebuilding the bridge and registering Discord commands now. If both succeed, I will request a hot reload next."
           );
 
           const buildResult = await rebuildDiscordBridge();
           if (!buildResult.ok) {
-            await replyEphemeral(interaction, formatBuildFailure(buildResult.output));
+            await replyEphemeral(
+              interaction,
+              formatScriptFailure("Build", buildResult.output, "No build output was captured.")
+            );
+            return;
+          }
+
+          const registerResult = await registerDiscordCommands();
+          if (!registerResult.ok) {
+            await replyEphemeral(
+              interaction,
+              formatScriptFailure(
+                "Discord command registration",
+                registerResult.output,
+                "No command registration output was captured."
+              )
+            );
             return;
           }
 
@@ -211,8 +232,13 @@ class DiscordBotWorker {
             await replyEphemeral(
               interaction,
               [
-                "Build succeeded, but hot reload is unavailable because the bot is not running under the bundled supervisor.",
-                formatBuildSuccessSummary(buildResult.output)
+                "Build and command registration succeeded, but hot reload is unavailable because the bot is not running under the bundled supervisor.",
+                formatScriptSuccessSummary("Build output", buildResult.output, "Build completed successfully."),
+                formatScriptSuccessSummary(
+                  "Discord command registration output",
+                  registerResult.output,
+                  "Discord commands registered successfully."
+                )
               ].join("\n\n")
             );
             return;
@@ -221,8 +247,14 @@ class DiscordBotWorker {
           await replyEphemeral(
             interaction,
             [
-              "Build succeeded. Hot reload requested.",
-              formatBuildSuccessSummary(buildResult.output)
+              "Build and command registration succeeded. Hot reload requested.",
+              "Existing session bindings will be reconciled when the new worker starts.",
+              formatScriptSuccessSummary("Build output", buildResult.output, "Build completed successfully."),
+              formatScriptSuccessSummary(
+                "Discord command registration output",
+                registerResult.output,
+                "Discord commands registered successfully."
+              )
             ].join("\n\n")
           );
           sendWorkerMessage({
@@ -625,7 +657,9 @@ class DiscordBotWorker {
 }
 
 class InteractionAck {
-  private initialResponseSent = false;
+  private readonly deliveryState: DiscordInteractionDeliveryState = {
+    initialResponseSent: false
+  };
 
   constructor(private readonly interaction: ChatInputCommandInteraction) {}
 
@@ -640,27 +674,11 @@ class InteractionAck {
   }
 
   async send(content: string): Promise<void> {
-    if (!this.interaction.deferred && !this.interaction.replied) {
-      await this.interaction.reply({
-        content,
-        ephemeral: true
-      });
-      this.initialResponseSent = true;
-      return;
-    }
-
-    if (!this.initialResponseSent && this.interaction.deferred) {
-      await this.interaction.editReply({
-        content
-      });
-      this.initialResponseSent = true;
-      return;
-    }
-
-    await this.interaction.followUp({
+    await sendDiscordInteractionResponse(
+      this.interaction,
       content,
-      ephemeral: true
-    });
+      this.deliveryState
+    );
   }
 
   async complete(content: string): Promise<void> {
@@ -699,57 +717,6 @@ function describeDiscordChannelType(channel: unknown): string {
   }
 
   return "unknown";
-}
-
-async function sendDiscordText(channel: DiscordSendableChannel, content: string): Promise<void> {
-  for (const chunk of splitDiscordMessage(content)) {
-    await channel.send(chunk);
-  }
-}
-
-function splitDiscordMessage(content: string): string[] {
-  const normalized = content.replace(/\r\n/g, "\n").trim();
-  if (normalized.length <= DISCORD_MESSAGE_LIMIT) {
-    return [normalized];
-  }
-
-  const chunks: string[] = [];
-  const lines = normalized.split("\n");
-  let buffer = "";
-  let openFenceHeader = "";
-
-  for (const line of lines) {
-    const candidate = buffer.length === 0 ? line : `${buffer}\n${line}`;
-    if (candidate.length <= DISCORD_MESSAGE_LIMIT) {
-      buffer = candidate;
-      openFenceHeader = updateFenceState(openFenceHeader, line);
-      continue;
-    }
-
-    if (buffer.length > 0) {
-      const finalized = finalizeDiscordChunk(buffer, openFenceHeader);
-      chunks.push(finalized.chunk);
-      buffer = finalized.nextPrefix;
-      openFenceHeader = finalized.nextFenceHeader;
-    }
-
-    if (line.length > DISCORD_MESSAGE_LIMIT) {
-      const splitLong = splitLongDiscordLine(line, openFenceHeader);
-      chunks.push(...splitLong.chunks);
-      buffer = splitLong.remainder;
-      openFenceHeader = splitLong.openFenceHeader;
-      continue;
-    }
-
-    buffer = buffer.length === 0 ? line : `${buffer}\n${line}`;
-    openFenceHeader = updateFenceState(openFenceHeader, line);
-  }
-
-  if (buffer.length > 0) {
-    chunks.push(buffer);
-  }
-
-  return chunks;
 }
 
 async function startDiscordTyping(
@@ -840,103 +807,32 @@ function asSendableChannel(channel: unknown): DiscordSendableChannel {
   throw new Error("This Discord channel cannot accept bot messages.");
 }
 
-function finalizeDiscordChunk(
-  buffer: string,
-  openFenceHeader: string
-): {
-  chunk: string;
-  nextPrefix: string;
-  nextFenceHeader: string;
-} {
-  if (!openFenceHeader) {
-    return {
-      chunk: buffer,
-      nextPrefix: "",
-      nextFenceHeader: ""
-    };
-  }
-
-  return {
-    chunk: `${buffer}\n\`\`\``,
-    nextPrefix: `${openFenceHeader}\n`,
-    nextFenceHeader: openFenceHeader
-  };
-}
-
-function splitLongDiscordLine(
-  line: string,
-  openFenceHeader: string
-): {
-  chunks: string[];
-  remainder: string;
-  openFenceHeader: string;
-} {
-  const chunks: string[] = [];
-  let remaining = line;
-  let activeFenceHeader = openFenceHeader;
-
-  while (remaining.length > DISCORD_MESSAGE_LIMIT) {
-    const available = activeFenceHeader ? DISCORD_MESSAGE_LIMIT - activeFenceHeader.length - 5 : DISCORD_MESSAGE_LIMIT;
-    const take = Math.max(available, 32);
-    const slice = remaining.slice(0, take);
-    remaining = remaining.slice(take);
-
-    if (activeFenceHeader) {
-      chunks.push(`${activeFenceHeader}\n${slice}\n\`\`\``);
-    } else {
-      chunks.push(slice);
-    }
-  }
-
-  return {
-    chunks,
-    remainder: activeFenceHeader ? `${activeFenceHeader}\n${remaining}` : remaining,
-    openFenceHeader: activeFenceHeader
-  };
-}
-
-function updateFenceState(current: string, line: string): string {
-  if (!line.startsWith("```")) {
-    return current;
-  }
-
-  if (current) {
-    return "";
-  }
-
-  return line;
-}
-
 async function replyEphemeral(
   interaction: ChatInputCommandInteraction,
   content: string
 ): Promise<void> {
-  if (!interaction.deferred && !interaction.replied) {
-    await interaction.reply({
-      content,
-      ephemeral: true
-    });
-    return;
-  }
-
-  if (interaction.deferred) {
-    await interaction.editReply({
-      content
-    });
-    return;
-  }
-
-  await interaction.followUp({
-    content,
-    ephemeral: true
-  });
+  await sendDiscordInteractionResponse(interaction, content);
 }
 
 async function rebuildDiscordBridge(): Promise<{
   ok: boolean;
   output: string;
 }> {
-  const child = spawn(getNpmCommand(), ["run", "build"], {
+  return runBridgeScript("build");
+}
+
+async function registerDiscordCommands(): Promise<{
+  ok: boolean;
+  output: string;
+}> {
+  return runBridgeScript("discord:register");
+}
+
+async function runBridgeScript(scriptName: string): Promise<{
+  ok: boolean;
+  output: string;
+}> {
+  const child = spawn(getNpmCommand(), ["run", scriptName], {
     cwd: BRIDGE_PROJECT_ROOT,
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -984,7 +880,7 @@ async function rebuildDiscordBridge(): Promise<{
 
   return {
     ok: exitCode === 0,
-    output: clipBuildOutput(lines.join("\n"))
+    output: clipScriptOutput(lines.join("\n"))
   };
 }
 
@@ -992,7 +888,7 @@ function getNpmCommand(): string {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
-function clipBuildOutput(output: string): string {
+function clipScriptOutput(output: string): string {
   const trimmed = output.trim();
   if (trimmed.length <= BUILD_OUTPUT_CHAR_LIMIT) {
     return trimmed;
@@ -1005,19 +901,19 @@ function trimCodeFencePayload(value: string): string {
   return value.replace(/```/g, "`\u200b``").trim();
 }
 
-function formatBuildFailure(output: string): string {
+function formatScriptFailure(label: string, output: string, fallback: string): string {
   return [
-    "**Build failed**",
+    `**${label} failed**`,
     "```text",
-    trimCodeFencePayload(output || "No build output was captured."),
+    trimCodeFencePayload(output || fallback),
     "```"
   ].join("\n");
 }
 
-function formatBuildSuccessSummary(output: string): string {
-  const body = output || "Build completed successfully.";
+function formatScriptSuccessSummary(label: string, output: string, fallback: string): string {
+  const body = output || fallback;
   return [
-    "**Build output**",
+    `**${label}**`,
     "```text",
     trimCodeFencePayload(body),
     "```"
@@ -1030,6 +926,36 @@ function formatTopLevelError(error: unknown): string {
   }
 
   return "Discord bridge failure: unknown error.";
+}
+
+function logSessionReconciliation(
+  context: string,
+  result: {
+    totalBindings: number;
+    updatedBindings: number;
+    clearedHandlerSessions: number;
+    clearedWorkerSessions: number;
+    droppedRepositoryBindings: number;
+  }
+): void {
+  console.log(
+    `${context}: reconciled ${result.updatedBindings}/${result.totalBindings} persisted session bindings (cleared handler sessions=${result.clearedHandlerSessions}, cleared worker sessions=${result.clearedWorkerSessions}, dropped repository bindings=${result.droppedRepositoryBindings}).`
+  );
+}
+
+function formatSessionReconciliationLines(result: {
+  totalBindings: number;
+  updatedBindings: number;
+  clearedHandlerSessions: number;
+  clearedWorkerSessions: number;
+  droppedRepositoryBindings: number;
+}): string[] {
+  return [
+    `- Session bindings refreshed: ${result.updatedBindings}/${result.totalBindings}`,
+    `- Cleared handler sessions: ${result.clearedHandlerSessions}`,
+    `- Cleared worker sessions: ${result.clearedWorkerSessions}`,
+    `- Dropped repo bindings: ${result.droppedRepositoryBindings}`
+  ];
 }
 
 function sendWorkerMessage(message: WorkerToSupervisorMessage): void {

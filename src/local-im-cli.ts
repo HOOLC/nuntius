@@ -7,7 +7,7 @@ import type { ConversationBinding, InboundTurn, OutboundMessage } from "./domain
 import { CodexBridgeService, type ConversationStatus, type TurnPublisher } from "./service.js";
 
 interface LocalChatState {
-  platform: "slack" | "discord";
+  platform: "slack" | "discord" | "feishu";
   workspaceId: string;
   channelId: string;
   threadId: string;
@@ -63,7 +63,7 @@ function parseArgs(args: string[]): LocalChatState {
 
     switch (value) {
       case "--platform":
-        if (next === "slack" || next === "discord") {
+        if (next === "slack" || next === "discord" || next === "feishu") {
           state.platform = next;
           index += 1;
         }

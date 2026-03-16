@@ -58,6 +58,10 @@ export function createDiscordCommandPayload(): RESTPostAPIChatInputApplicationCo
                   value: "binding"
                 },
                 {
+                  name: "context",
+                  value: "context"
+                },
+                {
                   name: "all",
                   value: "all"
                 }

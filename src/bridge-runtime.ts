@@ -2,7 +2,7 @@ import { CodexRunner } from "./codex-runner.js";
 import { loadConfig, type BridgeConfig } from "./config.js";
 import { InteractionRouter } from "./interaction-router.js";
 import { SerialTurnQueue } from "./serial-turn-queue.js";
-import { CodexBridgeService } from "./service.js";
+import { CodexBridgeService, type SessionReconciliationResult } from "./service.js";
 import { FileSessionStore } from "./session-store.js";
 
 export interface RepositoryRegistrySnapshot {
@@ -21,6 +21,7 @@ export interface BridgeRuntime {
   router: InteractionRouter;
   getRepositoryRegistrySnapshot(): RepositoryRegistrySnapshot;
   reloadRepositoryRegistry(): RepositoryRegistrySnapshot;
+  reconcileSessionBindings(): Promise<SessionReconciliationResult>;
 }
 
 export function createBridgeRuntime(config: BridgeConfig = loadConfig()): BridgeRuntime {
@@ -63,6 +64,7 @@ export function createBridgeRuntime(config: BridgeConfig = loadConfig()): Bridge
         source: config.configFilePath ? "file" : "env",
         sourcePath: config.repositoryRegistryPath ?? config.configFilePath
       };
-    }
+    },
+    reconcileSessionBindings: () => bridge.reconcileSessionBindings()
   };
 }

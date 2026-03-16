@@ -19,7 +19,7 @@ export type HandlerDecision =
     }
   | {
       action: "reset";
-      scope: "worker" | "binding" | "all";
+      scope: "worker" | "binding" | "context" | "all";
       message?: string;
     };
 
@@ -31,23 +31,22 @@ export function buildHandlerUserPrompt(input: {
 }): string {
   const { turn, state, availableRepositories, requireExplicitRepositorySelection } = input;
   const lines = [
-    "You are the handler Codex session for an IM bridge.",
-    "You are the conversational front-end. You decide whether to reply directly, bind a repository, reset state, or delegate a repo-scoped task to a worker Codex session.",
+    "You are the handler Codex session for an IM bridge thread that is not currently routed straight to a bound worker session.",
+    "You decide whether to reply directly, bind a repository, or reset state before repo-scoped work continues in the bound worker session.",
     "Reply with exactly one JSON object and no markdown.",
     "",
     "JSON protocol:",
     '- {"action":"reply","message":"..."}',
     '- {"action":"bind_repo","repositoryId":"repo-id","message":"optional","continueWithWorkerPrompt":"optional"}',
-    '- {"action":"delegate","workerPrompt":"repo-scoped instruction","message":"optional"}',
-    '- {"action":"reset","scope":"worker|binding|all","message":"optional"}',
+    '- {"action":"reset","scope":"worker|binding|context|all","message":"optional"}',
     "",
     "Rules:",
-    "- One thread has one handler session.",
     "- One thread may have at most one active repository binding at a time.",
     "- Do not silently switch repositories.",
-    "- If the user wants a different repository, use bind_repo first.",
+    "- Repository switching stays explicit: use bind_repo before any work should move to a different repository.",
+    "- Once a repository is bound, later plain-text thread replies bypass you and go straight to that worker session.",
     "- If no repository is bound and the user asks for repo work, ask which repository to use unless it is already explicit.",
-    "- Use delegate only for repo-scoped work that should run in the bound worker session.",
+    "- Use bind_repo with continueWithWorkerPrompt when the user explicitly names a repository and also wants immediate repo work.",
     "- Use reply for clarification, conversational answers, repo questions, and status-style answers.",
     `- Explicit repository selection required: ${String(requireExplicitRepositorySelection)}.`,
     "",
@@ -65,32 +64,6 @@ export function buildHandlerUserPrompt(input: {
   ];
 
   return lines.join("\n");
-}
-
-export function buildWorkerResultPrompt(input: {
-  turn: InboundTurn;
-  state: ConversationBinding;
-  workerPrompt: string;
-  workerOutput: string;
-}): string {
-  const { turn, state, workerPrompt, workerOutput } = input;
-
-  return [
-    "A worker Codex session has completed a repo-scoped task.",
-    "Reply with exactly one JSON object and no markdown.",
-    "Usually you should now answer the user with action=reply.",
-    "",
-    "Current state:",
-    `- Platform: ${turn.platform}`,
-    `- User: ${turn.userDisplayName ?? turn.userId} (${turn.userId})`,
-    `- Active repository: ${state.activeRepository?.repositoryId ?? "none"}`,
-    "",
-    "Worker prompt:",
-    workerPrompt,
-    "",
-    "Worker output:",
-    workerOutput
-  ].join("\n");
 }
 
 export function parseHandlerDecision(rawText: string): HandlerDecision {
@@ -183,10 +156,10 @@ function readOptionalString(record: Record<string, unknown>, key: string): strin
   return value;
 }
 
-function readResetScope(value: unknown): "worker" | "binding" | "all" {
-  if (value === "worker" || value === "binding" || value === "all") {
+function readResetScope(value: unknown): "worker" | "binding" | "context" | "all" {
+  if (value === "worker" || value === "binding" || value === "context" || value === "all") {
     return value;
   }
 
-  throw new Error("Expected reset scope to be one of worker, binding, or all.");
+  throw new Error("Expected reset scope to be one of worker, binding, context, or all.");
 }

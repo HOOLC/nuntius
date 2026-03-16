@@ -99,6 +99,8 @@ export class SlackBot {
   private botTeamId?: string;
 
   async start(): Promise<void> {
+    const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
+    logSessionReconciliation("Slack bot startup", sessionRefresh);
     await this.refreshSlackClient();
     this.installSignalHandlers();
 
@@ -347,6 +349,7 @@ export class SlackBot {
           const previousEventsPath = this.slackConfig.eventsPath;
 
           const snapshot = this.bridgeRuntime.reloadRepositoryRegistry();
+          const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
           this.slackConfig = loadSlackBotConfig();
           await this.refreshSlackClient();
 
@@ -374,6 +377,7 @@ export class SlackBot {
               `- Repo count: ${snapshot.repositoryTargets.length}`,
               `- Allowed users configured: ${this.slackConfig.allowedUserIds.length || "all"}`,
               `- Admin users configured: ${this.slackConfig.adminUserIds.length}`,
+              ...formatSessionReconciliationLines(sessionRefresh),
               ...notes
             ].join("\n")
           );
@@ -1009,6 +1013,36 @@ function formatTopLevelError(error: unknown): string {
   }
 
   return "Slack bridge failure: unknown error.";
+}
+
+function logSessionReconciliation(
+  context: string,
+  result: {
+    totalBindings: number;
+    updatedBindings: number;
+    clearedHandlerSessions: number;
+    clearedWorkerSessions: number;
+    droppedRepositoryBindings: number;
+  }
+): void {
+  console.log(
+    `${context}: reconciled ${result.updatedBindings}/${result.totalBindings} persisted session bindings (cleared handler sessions=${result.clearedHandlerSessions}, cleared worker sessions=${result.clearedWorkerSessions}, dropped repository bindings=${result.droppedRepositoryBindings}).`
+  );
+}
+
+function formatSessionReconciliationLines(result: {
+  totalBindings: number;
+  updatedBindings: number;
+  clearedHandlerSessions: number;
+  clearedWorkerSessions: number;
+  droppedRepositoryBindings: number;
+}): string[] {
+  return [
+    `- Session bindings refreshed: ${result.updatedBindings}/${result.totalBindings}`,
+    `- Cleared handler sessions: ${result.clearedHandlerSessions}`,
+    `- Cleared worker sessions: ${result.clearedWorkerSessions}`,
+    `- Dropped repo bindings: ${result.droppedRepositoryBindings}`
+  ];
 }
 
 export async function main(): Promise<void> {

@@ -76,6 +76,13 @@ If not set, commands register globally.
 npm run discord:start
 ```
 
+Or run all configured IM integrations together:
+
+```bash
+npm run build
+npm run start
+```
+
 ## Supported Discord Flows
 
 ### Slash Commands
@@ -109,7 +116,7 @@ npm run discord:start
 - Slash `ask` in a guild text channel or announcement channel creates a thread automatically.
 - Slash `bind` in a guild text channel or announcement channel also creates a thread automatically.
 - Normal guild-channel messages are ignored unless they mention the bot.
-- Thread and DM replies are routed through the persistent handler Codex session.
+- Once a thread or DM is bound to a repo, later replies go straight to that worker session; use `/codex bind` or `/codex reset` to change the routing explicitly.
 - `/codexadmin` is restricted to Discord user IDs listed in `NUNTIUS_DISCORD_ADMIN_USER_IDS`.
 - `/codexadmin reloadconfig` reloads the TOML config and repo registry in-process.
 - `/codexadmin hotreload` runs `npm run build` in the bridge repo first, then reconnects the Discord worker using the rebuilt `dist` code.

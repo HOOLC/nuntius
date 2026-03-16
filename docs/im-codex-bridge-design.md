@@ -2,22 +2,23 @@
 
 ## Goal
 
-Allow Slack and Discord users to talk to Codex conversationally, while still supporting real repo-scoped coding work.
+Allow Slack, Discord, and Feishu users to talk to Codex conversationally, while still supporting real repo-scoped coding work.
 
 The key design choice is:
 
-- the IM thread itself maps to a persistent handler Codex session
-- repo-scoped coding work runs in a separate worker Codex session
-- the handler decides when to ask clarifying questions, when to bind a repo, and when to delegate to the worker
+- the IM thread can start in a conversational handler session before any repository is bound
+- repo-scoped coding work runs in a separate worker Codex session bound to one repository target
+- once a thread is bound, later plain-text replies go straight to that worker session
+- bind/reset operations stay explicit so repository switching does not happen implicitly
 
-This gives you a more natural chat UX than a command-only bridge. The user can say things like:
+This still gives you a more natural chat UX than a command-only bridge. The user can say things like:
 
 - "work on nuntius in this thread"
 - "check why CI is failing"
 - "actually switch to api-server"
 - "summarize what you changed"
 
-The handler Codex interprets intent and only forwards repo work to the worker session when needed.
+The handler is only needed while the thread is still unbound. After binding, the worker session owns the repo-scoped conversation directly.
 
 ## Codex Surfaces
 
@@ -26,7 +27,7 @@ This design uses the locally available Codex CLI:
 - `codex exec --json`
 - `codex exec resume --json`
 
-That is enough for both persistent handler sessions and persistent worker sessions.
+That is enough for both optional handler sessions and persistent worker sessions.
 
 ## Core Model
 
@@ -34,16 +35,16 @@ Each IM conversation thread keeps two layers of state:
 
 ### 1. Handler Session
 
-This is the conversational front-end.
+This is the conversational front-end used before a repository is bound, or after the binding is explicitly reset.
 
 Responsibilities:
 
 - talk naturally with the user
 - understand intent
 - ask which repo to use when needed
-- decide whether the message is just conversational or needs repo work
-- decide when to bind, rebind, or reset
-- summarize worker results back to the user
+- decide when a repo must be bound before work can continue
+- decide when to bind or reset
+- ask clarifying questions before a worker session should start
 
 ### 2. Worker Session
 
@@ -63,14 +64,14 @@ The worker is bound to one configured repository target at a time.
 
 One chat thread maps to:
 
-- one handler Codex session
+- zero or one handler Codex session
 - zero or one active repository binding
 - zero or one active worker Codex session for that binding
 
 That means:
 
 - the thread can be conversational even before a repo is chosen
-- once a repo is bound, later repo tasks in that thread reuse the same worker session
+- once a repo is bound, later plain-text replies in that thread reuse the same worker session directly
 - switching repos is explicit and clears the old worker session
 
 ## Architecture
@@ -79,6 +80,7 @@ That means:
 flowchart LR
     Slack[Slack Adapter]
     Discord[Discord Adapter]
+    Feishu[Feishu Adapter]
     Queue[Per-Thread Queue]
     Store[(Conversation Store)]
     Orchestrator[Bridge Orchestrator]
@@ -87,15 +89,15 @@ flowchart LR
 
     Slack --> Queue
     Discord --> Queue
+    Feishu --> Queue
     Queue --> Orchestrator
     Orchestrator --> Store
     Orchestrator --> Handler
-    Handler --> Orchestrator
     Orchestrator --> Worker
     Worker --> Orchestrator
-    Orchestrator --> Handler
     Orchestrator --> Slack
     Orchestrator --> Discord
+    Orchestrator --> Feishu
 ```
 
 ## Conversation Flow
@@ -103,14 +105,14 @@ flowchart LR
 ### User Turn
 
 1. The adapter normalizes the IM message into an `InboundTurn`.
-2. The bridge resumes or creates the handler Codex session for that thread.
-3. The handler returns a structured decision in JSON.
+2. The bridge loads the persisted thread binding.
+3. If a repository is already bound, the bridge resumes or creates that worker session directly.
+4. If no repository is bound, the bridge resumes or creates the handler session and asks it for a structured decision in JSON.
 
 Possible handler decisions:
 
 - `reply`
 - `bind_repo`
-- `delegate`
 - `reset`
 
 ### Direct Reply
@@ -132,17 +134,17 @@ If the handler returns `bind_repo`, the bridge:
 2. updates the thread binding
 3. clears the old worker session if the repo changed
 4. optionally runs a worker task immediately if the handler included `continueWithWorkerPrompt`
+5. posts the worker output back to the thread directly instead of routing it through the handler again
 
-### Delegate to Worker
+### Direct Worker Follow-up
 
-If the handler returns `delegate`, the bridge:
+If a repository is already bound, later plain-text thread replies skip the handler and the bridge:
 
 1. resumes or creates the worker Codex session for the bound repo
 2. runs the repo-scoped task
-3. sends the worker result back into the handler session
-4. resumes the handler and asks it to compose the final user-facing reply
+3. posts the worker output back to the thread directly
 
-This is the critical pattern: the user does not talk to the worker directly. The handler remains the conversational owner of the thread.
+This is the critical pattern: once a repo is bound, the user talks to that worker session directly. The handler is not in the steady-state reply path anymore.
 
 ## State Model
 
@@ -169,6 +171,7 @@ type ConversationBinding = {
 Important rules:
 
 - `handlerSessionId` survives ordinary repo resets unless the user explicitly resets the whole thread
+- `handlerSessionId` is only used while the thread is unbound
 - `workerSessionId` is valid only for the active repository binding
 - changing repositories clears the old `workerSessionId`
 
@@ -187,10 +190,6 @@ Expected handler output:
 ```
 
 ```json
-{"action":"delegate","workerPrompt":"Inspect the latest CI failure and summarize the root cause.","message":"I’m checking the repo now."}
-```
-
-```json
 {"action":"reset","scope":"worker","message":"Cleared the worker session for this thread."}
 ```
 
@@ -202,16 +201,16 @@ Repository choice is thread context, not per-message context.
 
 Recommended behavior:
 
-- no repo bound: handler can converse and ask questions, but cannot delegate repo work yet
-- repo bound: handler may delegate repo tasks freely to the worker
-- user asks to switch repos: handler emits `bind_repo`, which updates the thread binding and clears the old worker session
+- no repo bound: the handler can converse and ask questions, but cannot start repo work until the repository is explicit
+- repo bound: normal plain-text replies go directly to the worker session for that repository
+- user asks to switch repos: the user should do that explicitly with `bind_repo` or `/codex bind`, which updates the thread binding and clears the old worker session
 
 This is the right place for conversational repo selection:
 
 - user: "work in nuntius in this thread"
 - handler: bind repo to `nuntius`
 - user: "look at the latest test failures"
-- handler: delegate to the `nuntius` worker
+- bridge: route the message straight to the `nuntius` worker
 
 ## Security Model
 
@@ -260,8 +259,8 @@ Recommended Slack UX:
 Example:
 
 1. `/codex work on nuntius`
-2. bridge creates the handler session and thread
-3. later thread replies go to the same handler session
+2. bridge creates the thread and binds `nuntius`
+3. later thread replies go to the same worker session for `nuntius`
 
 Useful explicit commands:
 
@@ -282,8 +281,8 @@ Recommended Discord UX:
 Example:
 
 1. `/codex start prompt:"work on nuntius"`
-2. bridge creates the handler session and a thread
-3. later replies inside that thread continue the same handler session
+2. bridge creates the thread and binds `nuntius`
+3. later replies inside that thread continue the same worker session
 
 ## Operational Requirements
 

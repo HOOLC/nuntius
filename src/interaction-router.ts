@@ -22,7 +22,7 @@ export type BridgeCommand =
     }
   | {
       kind: "reset";
-      scope: "worker" | "binding" | "all";
+      scope: "worker" | "binding" | "context" | "all";
     };
 
 export class InteractionRouter {
@@ -112,9 +112,10 @@ export function parseBridgeCommand(text: string): BridgeCommand {
         kind: "help"
       };
     case "reset":
+    case "clear":
       return {
         kind: "reset",
-        scope: parseResetScope(tail[0])
+        scope: head === "clear" ? "context" : parseResetScope(tail[0])
       };
     default:
       return {
@@ -124,8 +125,8 @@ export function parseBridgeCommand(text: string): BridgeCommand {
   }
 }
 
-function parseResetScope(raw: string | undefined): "worker" | "binding" | "all" {
-  if (raw === "worker" || raw === "binding" || raw === "all") {
+function parseResetScope(raw: string | undefined): "worker" | "binding" | "context" | "all" {
+  if (raw === "worker" || raw === "binding" || raw === "context" || raw === "all") {
     return raw;
   }
 
@@ -138,9 +139,10 @@ function buildHelpMessage(): string {
     "/codex status",
     "/codex repos",
     "/codex bind <repo-id>",
-    "/codex reset [worker|binding|all]",
-    "/codex <message>  -> send the rest of the message into the conversational handler",
-    "plain text         -> also goes to the conversational handler"
+    "/codex reset [worker|binding|context|all]",
+    "/codex clear      -> clear Codex session history but keep the current repo binding",
+    "/codex <message>  -> if a repo is bound, send it straight to that worker; otherwise send it to the handler",
+    "plain text         -> follows the same route inside an existing conversation"
   ].join("\n");
 }
 
@@ -156,6 +158,11 @@ function formatStatus(status: ConversationStatus): string {
   lines.push(`- Handler session: ${status.binding.handlerSessionId ?? "none"}`);
   lines.push(`- Bound repo: ${status.binding.activeRepository?.repositoryId ?? "none"}`);
   lines.push(`- Worker session: ${status.binding.activeRepository?.workerSessionId ?? "none"}`);
+  lines.push(
+    `- Plain-text routing: ${
+      status.binding.activeRepository ? "direct to the bound worker session" : "through the handler session"
+    }`
+  );
   lines.push(
     `- Codex network access: ${formatCodexNetworkAccess(status.binding.activeRepository)}`
   );
@@ -191,12 +198,14 @@ function buildBindMessage(binding: {
   return `Bound this conversation to "${binding.activeRepository.repositoryId}" (${binding.activeRepository.sandboxMode}, Codex network access: ${networkAccess}).`;
 }
 
-function buildResetMessage(scope: "worker" | "binding" | "all"): string {
+function buildResetMessage(scope: "worker" | "binding" | "context" | "all"): string {
   switch (scope) {
     case "worker":
       return "Reset the worker Codex session for this conversation.";
     case "binding":
       return "Cleared the repository binding for this conversation.";
+    case "context":
+      return "Cleared Codex context for this conversation and kept the current repository binding.";
     case "all":
       return "Cleared the whole conversation state for this thread.";
   }

@@ -32,3 +32,17 @@ allowed_user_ids = ["U0123456789"]
 admin_user_ids = ["U0123456789"]
 # Only needed for `/codexadmin restart`.
 allow_process_restart = false
+
+[feishu]
+app_id = "cli_xxxxxxxxxxxxxxxx"
+app_secret = "your-feishu-app-secret"
+verification_token = "your-feishu-verification-token"
+encrypt_key = "your-feishu-encrypt-key"
+host = "0.0.0.0"
+port = 8789
+events_path = "/feishu/events"
+health_path = "/healthz"
+allowed_open_ids = ["ou_xxxxxxxxxxxxxxxx"]
+admin_open_ids = ["ou_xxxxxxxxxxxxxxxx"]
+# Only needed for `/codexadmin restart`.
+allow_process_restart = false

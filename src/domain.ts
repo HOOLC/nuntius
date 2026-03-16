@@ -1,4 +1,4 @@
-export type ChatPlatform = "slack" | "discord";
+export type ChatPlatform = "slack" | "discord" | "feishu";
 export type ConversationScope = "dm" | "channel" | "thread";
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
@@ -45,9 +45,16 @@ export interface RepositoryBinding {
   updatedAt: string;
 }
 
+export interface HandlerSessionBinding {
+  workspacePath: string;
+  sandboxMode: SandboxMode;
+  model?: string;
+}
+
 export interface ConversationBinding {
   key: ConversationKey;
   handlerSessionId?: string;
+  handlerConfig?: HandlerSessionBinding;
   activeRepository?: RepositoryBinding;
   createdByUserId: string;
   createdAt: string;

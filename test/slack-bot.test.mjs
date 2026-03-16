@@ -42,7 +42,7 @@ test("slash bind in a channel bootstraps a Slack thread and confirms ephemerally
   assert.equal(harness.records[3].body.text, "Bound in this thread.");
 });
 
-test("thread replies reuse the bound conversation and keep Slack progress in one status message", async (t) => {
+test("thread replies after bind go straight to the worker session and reuse it", async (t) => {
   const harness = createHarness();
   t.after(() => harness.cleanup());
 
@@ -98,13 +98,42 @@ test("thread replies reuse the bound conversation and keep Slack progress in one
   assert.equal(harness.records[2].body.ts, "1002");
   assert.match(harness.records[2].body.text, /^\*Completed\*/);
   assert.equal(harness.records[3].body.thread_ts, "1000");
-  assert.equal(harness.records[3].body.text, "Worker looked at the repo.");
+  assert.equal(harness.records[3].body.text, "Worker summary output.");
+
+  harness.resetRecords();
+
+  await bot.handleEventRequest(
+    Buffer.from(
+      JSON.stringify({
+        type: "event_callback",
+        team_id: "T111",
+        event_id: "evt-2",
+        event: {
+          type: "message",
+          user: "U111",
+          text: "summarize the changes",
+          channel: "C222",
+          channel_type: "channel",
+          ts: "1710000002.000300",
+          thread_ts: "1000"
+        }
+      })
+    ),
+    createResponseRecorder()
+  );
+
+  assert.deepEqual(
+    harness.records.map((record) => record.kind),
+    ["chat.postMessage", "chat.update", "chat.update", "chat.postMessage"]
+  );
+  assert.equal(harness.records[0].body.thread_ts, "1000");
+  assert.match(harness.records[0].body.text, /^\*Started\*/);
+  assert.match(harness.records[0].body.text, /session=worker-session/);
+  assert.equal(harness.records[3].body.thread_ts, "1000");
+  assert.equal(harness.records[3].body.text, "Worker follow-up output.");
 
   const invocations = readInvocationLog(harness.paths.invocationLogPath);
-  assert.equal(invocations.length, 3);
-  assert.equal(invocations[0], "handler:new");
-  assert.equal(invocations[1], "worker:new");
-  assert.equal(invocations[2], "resume:handler-session");
+  assert.deepEqual(invocations, ["worker:new", "resume:worker-session"]);
 });
 
 function createHarness() {
@@ -209,28 +238,16 @@ set -euo pipefail
 
 prompt="\${!#}"
 session_id=""
-if [[ "\${#}" -ge 2 && "\${2}" == "resume" ]]; then
+if [[ "\${2:-}" == "resume" || "\${3:-}" == "resume" ]]; then
   session_id="\${@: -2:1}"
   printf '%s\\n' "resume:\${session_id}" >> ${JSON.stringify(invocationLogPath)}
-elif [[ "\${prompt}" == *"Latest user message:"* ]]; then
-  printf '%s\\n' 'handler:new' >> ${JSON.stringify(invocationLogPath)}
 else
   printf '%s\\n' 'worker:new' >> ${JSON.stringify(invocationLogPath)}
 fi
 
-if [[ "\${prompt}" == *"A worker Codex session has completed"* ]]; then
-  printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"action\\":\\"reply\\",\\"message\\":\\"Worker looked at the repo.\\"}"}}'
-  printf '%s\\n' '{"type":"turn.completed"}'
-  exit 0
-fi
-
-if [[ "\${prompt}" == *"Latest user message:"* ]]; then
-  printf '%s\\n' '{"type":"thread.started","thread_id":"handler-session"}'
-  if [[ "\${prompt}" == *"check the repo now"* ]]; then
-    printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"action\\":\\"delegate\\",\\"workerPrompt\\":\\"Inspect the repo and summarize findings.\\",\\"message\\":\\"Looking at the repo now.\\"}"}}'
-  else
-    printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"action\\":\\"reply\\",\\"message\\":\\"Handler reply.\\"}"}}'
-  fi
+if [[ -n "\${session_id}" ]]; then
+  printf '%s\\n' '{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"README.md","kind":"update"}]}}'
+  printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Worker follow-up output."}}'
   printf '%s\\n' '{"type":"turn.completed"}'
   exit 0
 fi
