@@ -23,6 +23,9 @@ export type BridgeCommand =
   | {
       kind: "reset";
       scope: "worker" | "binding" | "context" | "all";
+    }
+  | {
+      kind: "interrupt";
     };
 
 export class InteractionRouter {
@@ -67,6 +70,11 @@ export class InteractionRouter {
         await this.bridge.resetState(turn, command.scope);
         await publisher.publishCompleted(turn, {
           text: buildResetMessage(command.scope)
+        });
+        return;
+      case "interrupt":
+        await publisher.publishCompleted(turn, {
+          text: buildInterruptMessage(await this.bridge.interruptConversation(turn))
         });
         return;
     }
@@ -117,6 +125,11 @@ export function parseBridgeCommand(text: string): BridgeCommand {
         kind: "reset",
         scope: head === "clear" ? "context" : parseResetScope(tail[0])
       };
+    case "interrupt":
+    case "stop":
+      return {
+        kind: "interrupt"
+      };
     default:
       return {
         kind: "conversation",
@@ -140,6 +153,7 @@ function buildHelpMessage(): string {
     "/codex repos",
     "/codex bind <repo-id>",
     "/codex reset [worker|binding|context|all]",
+    "/codex interrupt  -> interrupt the active Codex turn in this conversation",
     "/codex clear      -> clear Codex session history but keep the current repo binding",
     "/codex <message>  -> if a repo is bound, send it straight to that worker; otherwise send it to the handler",
     "plain text         -> follows the same route inside an existing conversation"
@@ -208,6 +222,26 @@ function buildResetMessage(scope: "worker" | "binding" | "context" | "all"): str
       return "Cleared Codex context for this conversation and kept the current repository binding.";
     case "all":
       return "Cleared the whole conversation state for this thread.";
+  }
+}
+
+function buildInterruptMessage(result: {
+  status: "idle" | "requested" | "pending";
+  actor?: "handler" | "worker";
+  repositoryId?: string;
+}): string {
+  const target =
+    result.actor === "worker"
+      ? `worker turn${result.repositoryId ? ` for "${result.repositoryId}"` : ""}`
+      : "Codex turn";
+
+  switch (result.status) {
+    case "requested":
+      return `Interrupt requested for the active ${target}.`;
+    case "pending":
+      return `An interrupt is already pending for the active ${target}.`;
+    case "idle":
+      return "No active Codex turn is running in this conversation.";
   }
 }
 

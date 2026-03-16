@@ -330,6 +330,7 @@ function createNoopPublisher() {
     async publishStarted() {},
     async publishProgress() {},
     async publishCompleted() {},
+    async publishInterrupted() {},
     async publishFailed() {}
   };
 }

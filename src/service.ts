@@ -15,7 +15,7 @@ import type {
   RepositoryBinding
 } from "./domain.js";
 import { conversationKeyToId, toConversationKey } from "./domain.js";
-import type { CodexRunner } from "./codex-runner.js";
+import { CodexTurnInterruptedError, type CodexRunner } from "./codex-runner.js";
 import {
   buildHandlerUserPrompt,
   parseHandlerDecision,
@@ -29,6 +29,7 @@ export interface TurnPublisher {
   publishStarted(turn: InboundTurn, binding: ConversationBinding, note?: string): Promise<void>;
   publishProgress(turn: InboundTurn, message: string): Promise<void>;
   publishCompleted(turn: InboundTurn, message: OutboundMessage): Promise<void>;
+  publishInterrupted(turn: InboundTurn, message: string): Promise<void>;
   publishFailed(turn: InboundTurn, errorMessage: string): Promise<void>;
 }
 
@@ -50,7 +51,33 @@ interface HandlerRunResult {
   decision: HandlerDecision;
 }
 
+type ActiveTurnActor = "handler" | "worker";
+
+interface ActiveTurnState {
+  actor: ActiveTurnActor;
+  repositoryId?: string;
+  controller: AbortController;
+}
+
+export interface InterruptConversationResult {
+  status: "idle" | "requested" | "pending";
+  actor?: ActiveTurnActor;
+  repositoryId?: string;
+}
+
+class InterruptedConversationTurnError extends Error {
+  constructor(
+    message: string,
+    readonly binding: ConversationBinding
+  ) {
+    super(message);
+    this.name = "InterruptedConversationTurnError";
+  }
+}
+
 export class CodexBridgeService {
+  private readonly activeTurns = new Map<string, ActiveTurnState>();
+
   constructor(
     private readonly config: BridgeConfig,
     private readonly sessionStore: SessionStore,
@@ -106,6 +133,12 @@ export class CodexBridgeService {
 
         await publisher.publishCompleted(turn, finalMessage);
       } catch (error) {
+        if (error instanceof InterruptedConversationTurnError) {
+          await this.sessionStore.upsert(error.binding);
+          await publisher.publishInterrupted(turn, error.message);
+          return;
+        }
+
         const errorMessage =
           error instanceof Error ? error.message : "The bridge hit an unknown failure.";
         await publisher.publishFailed(turn, errorMessage);
@@ -203,6 +236,32 @@ export class CodexBridgeService {
     };
   }
 
+  async interruptConversation(turn: InboundTurn): Promise<InterruptConversationResult> {
+    const conversationId = conversationKeyToId(toConversationKey(turn));
+    const activeTurn = this.activeTurns.get(conversationId);
+
+    if (!activeTurn) {
+      return {
+        status: "idle"
+      };
+    }
+
+    if (activeTurn.controller.signal.aborted) {
+      return {
+        status: "pending",
+        actor: activeTurn.actor,
+        repositoryId: activeTurn.repositoryId
+      };
+    }
+
+    activeTurn.controller.abort();
+    return {
+      status: "requested",
+      actor: activeTurn.actor,
+      repositoryId: activeTurn.repositoryId
+    };
+  }
+
   private async runHandlerTurn(
     turn: InboundTurn,
     binding: ConversationBinding,
@@ -220,32 +279,44 @@ export class CodexBridgeService {
       announceTurnStart: true
     });
 
-    let result;
-    try {
-      progress.start();
-      result = await this.runner.runTurn({
-        prompt,
-        repositoryPath: this.config.handlerWorkspacePath,
-        sandboxMode: this.config.handlerSandboxMode,
-        sessionId: binding.handlerSessionId,
-        model: this.config.handlerModel,
-        onEvent: (event) => {
-          progress.onEvent(event);
+    return this.runWithActiveTurn(turn, { actor: "handler" }, async (signal) => {
+      let result;
+      try {
+        progress.start();
+        result = await this.runner.runTurn({
+          prompt,
+          repositoryPath: this.config.handlerWorkspacePath,
+          sandboxMode: this.config.handlerSandboxMode,
+          sessionId: binding.handlerSessionId,
+          model: this.config.handlerModel,
+          onEvent: (event) => {
+            progress.onEvent(event);
+          },
+          signal
+        });
+      } catch (error) {
+        if (error instanceof CodexTurnInterruptedError) {
+          throw new InterruptedConversationTurnError(
+            error.message,
+            this.buildInterruptedHandlerBinding(binding, error.sessionId)
+          );
         }
-      });
-    } finally {
-      await progress.stop();
-    }
 
-    return {
-      binding: {
-        ...binding,
-        handlerSessionId: result.sessionId ?? binding.handlerSessionId,
-        handlerConfig: buildHandlerSessionConfig(this.config),
-        updatedAt: new Date().toISOString()
-      },
-      decision: parseHandlerDecision(result.responseText)
-    };
+        throw error;
+      } finally {
+        await progress.stop();
+      }
+
+      return {
+        binding: {
+          ...binding,
+          handlerSessionId: result.sessionId ?? binding.handlerSessionId,
+          handlerConfig: buildHandlerSessionConfig(this.config),
+          updatedAt: new Date().toISOString()
+        },
+        decision: parseHandlerDecision(result.responseText)
+      };
+    });
   }
 
   private async applyHandlerDecision(
@@ -328,21 +399,38 @@ export class CodexBridgeService {
   ): Promise<{ binding: ConversationBinding; finalMessage: OutboundMessage }> {
     const currentBinding = this.refreshActiveRepositoryBinding(turn, binding);
     await this.sessionStore.upsert(currentBinding);
-    await publisher.publishStarted(turn, currentBinding, note);
 
-    const workerResult = await this.runWorkerTurn(turn, currentBinding, workerPrompt, publisher);
+    return this.runWithActiveTurn(
+      turn,
+      {
+        actor: "worker",
+        repositoryId: currentBinding.activeRepository?.repositoryId
+      },
+      async (signal) => {
+        await publisher.publishStarted(turn, currentBinding, note);
 
-    return {
-      binding: workerResult.binding,
-      finalMessage: clipMessage(buildWorkerReply(workerResult.output), this.config.maxResponseChars)
-    };
+        const workerResult = await this.runWorkerTurn(
+          turn,
+          currentBinding,
+          workerPrompt,
+          publisher,
+          signal
+        );
+
+        return {
+          binding: workerResult.binding,
+          finalMessage: clipMessage(buildWorkerReply(workerResult.output), this.config.maxResponseChars)
+        };
+      }
+    );
   }
 
   private async runWorkerTurn(
     turn: InboundTurn,
     binding: ConversationBinding,
     workerPrompt: string,
-    publisher: TurnPublisher
+    publisher: TurnPublisher,
+    signal: AbortSignal
   ): Promise<{ binding: ConversationBinding; output: string }> {
     if (!binding.activeRepository) {
       throw new Error("A worker turn was requested without an active repository binding.");
@@ -376,9 +464,17 @@ export class CodexBridgeService {
         configOverrides: worker.codexConfigOverrides,
         onEvent: (event) => {
           progress.onEvent(event);
-        }
+        },
+        signal
       });
     } catch (error) {
+      if (error instanceof CodexTurnInterruptedError) {
+        throw new InterruptedConversationTurnError(
+          error.message,
+          this.buildInterruptedWorkerBinding(binding, error.sessionId)
+        );
+      }
+
       if (error instanceof Error) {
         throw new Error(buildCodexNetworkAccessFailureMessage(worker, error.message));
       }
@@ -537,6 +633,70 @@ export class CodexBridgeService {
 
   private resolveRepositoryById(repositoryId: string): RepositoryTarget | undefined {
     return this.config.repositoryTargets.find((candidate) => candidate.id === repositoryId);
+  }
+
+  private async runWithActiveTurn<T>(
+    turn: InboundTurn,
+    activeTurn: {
+      actor: ActiveTurnActor;
+      repositoryId?: string;
+    },
+    task: (signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    const conversationId = conversationKeyToId(toConversationKey(turn));
+    const controller = new AbortController();
+    const state: ActiveTurnState = {
+      ...activeTurn,
+      controller
+    };
+
+    this.activeTurns.set(conversationId, state);
+
+    try {
+      return await task(controller.signal);
+    } finally {
+      if (this.activeTurns.get(conversationId) === state) {
+        this.activeTurns.delete(conversationId);
+      }
+    }
+  }
+
+  private buildInterruptedHandlerBinding(
+    binding: ConversationBinding,
+    sessionId: string | undefined
+  ): ConversationBinding {
+    const nextHandlerSessionId = sessionId ?? binding.handlerSessionId;
+    const nextHandlerConfig =
+      nextHandlerSessionId || binding.handlerConfig
+        ? buildHandlerSessionConfig(this.config)
+        : binding.handlerConfig;
+
+    return {
+      ...binding,
+      handlerSessionId: nextHandlerSessionId,
+      handlerConfig: nextHandlerConfig,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  private buildInterruptedWorkerBinding(
+    binding: ConversationBinding,
+    sessionId: string | undefined
+  ): ConversationBinding {
+    if (!binding.activeRepository) {
+      return touchBinding(binding);
+    }
+
+    const now = new Date().toISOString();
+    return {
+      ...binding,
+      activeRepository: {
+        ...binding.activeRepository,
+        workerSessionId: sessionId ?? binding.activeRepository.workerSessionId,
+        updatedAt: now
+      },
+      updatedAt: now
+    };
   }
 }
 
@@ -808,7 +968,7 @@ const PROGRESS_HEARTBEAT_MS = 20_000;
 const PROGRESS_DUPLICATE_WINDOW_MS = 4_000;
 const MAX_PROGRESS_MESSAGES_PER_RUN = 14;
 
-type CodexProgressActor = "handler" | "worker";
+type CodexProgressActor = ActiveTurnActor;
 
 interface CodexProgressContext {
   actor: CodexProgressActor;

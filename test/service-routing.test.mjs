@@ -4,7 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { parseBridgeCommand } from "../dist/interaction-router.js";
+import { CodexTurnInterruptedError } from "../dist/codex-runner.js";
+import { InteractionRouter, parseBridgeCommand } from "../dist/interaction-router.js";
 import { CodexBridgeService } from "../dist/service.js";
 import { FileSessionStore } from "../dist/session-store.js";
 import { SerialTurnQueue } from "../dist/serial-turn-queue.js";
@@ -370,6 +371,91 @@ test("resetState context clears Codex sessions but keeps the repository binding"
   assert.equal(status.binding?.activeRepository?.workerSessionId, undefined);
 });
 
+test("interrupt commands bypass the queue and stop the active worker turn", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-interrupt-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const runnerStarted = createDeferred();
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        request.onEvent?.({
+          type: "thread.started",
+          thread_id: "worker-session-1"
+        });
+        runnerStarted.resolve();
+
+        await new Promise((_resolve, reject) => {
+          const abort = () => {
+            request.signal?.removeEventListener("abort", abort);
+            reject(new CodexTurnInterruptedError(undefined, "worker-session-1"));
+          };
+
+          if (request.signal?.aborted) {
+            abort();
+            return;
+          }
+
+          request.signal?.addEventListener("abort", abort, { once: true });
+        });
+
+        throw new Error("unreachable");
+      }
+    }
+  );
+
+  const router = new InteractionRouter(service);
+  const turn = buildTurn("inspect the repo");
+  await service.bindConversation(turn, "repo");
+
+  const activePublisher = createPublisher();
+  const activePromise = router.handleTurn(turn, activePublisher);
+  await runnerStarted.promise;
+
+  const interruptPublisher = createPublisher();
+  const interruptPromise = router.handleTurn(buildTurn("/codex interrupt"), interruptPublisher);
+  const interruptRace = await Promise.race([
+    interruptPromise.then(() => "completed"),
+    new Promise((resolve) => {
+      setTimeout(() => resolve("timed_out"), 200);
+    })
+  ]);
+
+  if (interruptRace === "timed_out") {
+    await service.interruptConversation(turn);
+    await activePromise;
+    assert.fail("interrupt command was queued behind the active worker turn");
+  }
+
+  await interruptPromise;
+  await activePromise;
+
+  assert.deepEqual(interruptPublisher.completed, [
+    'Interrupt requested for the active worker turn for "repo".'
+  ]);
+  assert.deepEqual(activePublisher.interrupted, ["Interrupted the active Codex turn."]);
+  assert.deepEqual(activePublisher.failed, []);
+
+  const status = await service.getConversationStatus(turn);
+  assert.equal(status.binding?.activeRepository?.workerSessionId, "worker-session-1");
+});
+
 test("parseBridgeCommand maps clear commands to a fresh-context reset", () => {
   assert.deepEqual(parseBridgeCommand("/codex clear"), {
     kind: "reset",
@@ -378,6 +464,12 @@ test("parseBridgeCommand maps clear commands to a fresh-context reset", () => {
   assert.deepEqual(parseBridgeCommand("/codex reset context"), {
     kind: "reset",
     scope: "context"
+  });
+  assert.deepEqual(parseBridgeCommand("/codex interrupt"), {
+    kind: "interrupt"
+  });
+  assert.deepEqual(parseBridgeCommand("/codex stop"), {
+    kind: "interrupt"
   });
 });
 
@@ -416,6 +508,7 @@ function createPublisher() {
     started: [],
     progress: [],
     completed: [],
+    interrupted: [],
     failed: [],
     async publishQueued() {
       this.queued += 1;
@@ -432,8 +525,26 @@ function createPublisher() {
     async publishCompleted(_turn, message) {
       this.completed.push(message.text);
     },
+    async publishInterrupted(_turn, message) {
+      this.interrupted.push(message);
+    },
     async publishFailed(_turn, errorMessage) {
       this.failed.push(errorMessage);
     }
+  };
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+
+  return {
+    promise,
+    resolve,
+    reject
   };
 }

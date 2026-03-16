@@ -69,6 +69,11 @@ export function createDiscordCommandPayload(): RESTPostAPIChatInputApplicationCo
           )
       )
       .addSubcommand((subcommand) =>
+        subcommand
+          .setName("interrupt")
+          .setDescription("Interrupt the active Codex turn in this conversation")
+      )
+      .addSubcommand((subcommand) =>
         subcommand.setName("help").setDescription("Show available Codex bridge commands")
       )
       .toJSON(),

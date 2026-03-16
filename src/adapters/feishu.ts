@@ -91,6 +91,10 @@ class FeishuPublisher implements TurnPublisher {
     await this.envelope.postMessage(`${message.text}${suffix}`);
   }
 
+  async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
+    await this.setStatusMessage("Interrupted", message);
+  }
+
   async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
     if (this.statusMessageId && this.envelope.updateMessage) {
       await this.tryUpdateStatusMessage(

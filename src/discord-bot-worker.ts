@@ -137,6 +137,9 @@ class DiscordBotWorker {
           await this.handleDirectInteractionCommand(interaction, `/codex reset ${scope}`);
           return;
         }
+        case "interrupt":
+          await this.handleDirectInteractionCommand(interaction, "/codex interrupt");
+          return;
         case "help":
           await this.handleDirectInteractionCommand(interaction, "/codex help");
           return;

@@ -236,6 +236,10 @@ class ConsolePublisher implements TurnPublisher {
     console.log(`[codex]\n${message.text}`);
   }
 
+  async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
+    console.log(`[interrupted]\n${message}`);
+  }
+
   async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
     console.log(`[error]\n${errorMessage}`);
   }

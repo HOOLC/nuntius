@@ -96,6 +96,10 @@ class DiscordPublisher implements TurnPublisher {
     await this.envelope.followUp(renderDiscordReply(`${message.text}${suffix}`));
   }
 
+  async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
+    await this.envelope.followUp(renderDiscordStatus("Interrupted", message));
+  }
+
   async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
     await this.envelope.followUp(renderDiscordError(errorMessage));
   }

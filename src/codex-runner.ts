@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import readline from "node:readline";
 
 import type {
@@ -20,12 +20,30 @@ export interface CodexTurnRequest {
   addDirs?: string[];
   configOverrides?: string[];
   onEvent?: (event: CodexEvent) => void;
+  signal?: AbortSignal;
+}
+
+const INTERRUPT_ESCALATE_TO_SIGTERM_MS = 5_000;
+const INTERRUPT_ESCALATE_TO_SIGKILL_MS = 10_000;
+
+export class CodexTurnInterruptedError extends Error {
+  constructor(
+    message: string | undefined = "Interrupted the active Codex turn.",
+    readonly sessionId?: string
+  ) {
+    super(message ?? "Interrupted the active Codex turn.");
+    this.name = "CodexTurnInterruptedError";
+  }
 }
 
 export class CodexRunner {
   constructor(private readonly codexBinary: string = "codex") {}
 
   async runTurn(request: CodexTurnRequest): Promise<CodexTurnResult> {
+    if (request.signal?.aborted) {
+      throw new CodexTurnInterruptedError(undefined, request.sessionId);
+    }
+
     const args = request.sessionId
       ? buildResumeArgs(request)
       : buildNewSessionArgs(request);
@@ -33,6 +51,10 @@ export class CodexRunner {
     const child = spawn(this.codexBinary, args, {
       cwd: request.repositoryPath,
       stdio: ["ignore", "pipe", "pipe"]
+    });
+    let interruptRequested = false;
+    const cleanupInterrupt = installInterruptHandler(child, request.signal, () => {
+      interruptRequested = true;
     });
 
     let sessionId = request.sessionId;
@@ -83,12 +105,31 @@ export class CodexRunner {
       }
     })();
 
-    const exitCode = await new Promise<number>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", (code) => resolve(code ?? 1));
-    });
+    let exitCode = 1;
+    let exitSignal: NodeJS.Signals | null = null;
 
-    await Promise.all([stdoutTask, stderrTask]);
+    try {
+      ({ exitCode, exitSignal } = await new Promise<{
+        exitCode: number;
+        exitSignal: NodeJS.Signals | null;
+      }>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) =>
+          resolve({
+            exitCode: code ?? 1,
+            exitSignal: signal
+          })
+        );
+      }));
+
+      await Promise.all([stdoutTask, stderrTask]);
+    } finally {
+      cleanupInterrupt();
+    }
+
+    if (interruptRequested && (exitSignal || exitCode !== 0)) {
+      throw new CodexTurnInterruptedError(undefined, sessionId);
+    }
 
     if (exitCode !== 0) {
       const details = stderrLines.length > 0 ? stderrLines.join("\n") : "No stderr output.";
@@ -170,6 +211,57 @@ function appendAddDirArgs(args: string[], addDirs: string[] | undefined): void {
   for (const addDir of addDirs ?? []) {
     args.push("--add-dir", addDir);
   }
+}
+
+function installInterruptHandler(
+  child: ChildProcess,
+  signal: AbortSignal | undefined,
+  onInterruptRequested: () => void
+): () => void {
+  if (!signal) {
+    return () => undefined;
+  }
+
+  let sigtermTimer: NodeJS.Timeout | undefined;
+  let sigkillTimer: NodeJS.Timeout | undefined;
+
+  const requestInterrupt = () => {
+    onInterruptRequested();
+
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return;
+    }
+
+    child.kill("SIGINT");
+
+    sigtermTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+      }
+    }, INTERRUPT_ESCALATE_TO_SIGTERM_MS);
+
+    sigkillTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }, INTERRUPT_ESCALATE_TO_SIGKILL_MS);
+  };
+
+  if (signal.aborted) {
+    requestInterrupt();
+  } else {
+    signal.addEventListener("abort", requestInterrupt, { once: true });
+  }
+
+  return () => {
+    signal.removeEventListener("abort", requestInterrupt);
+    if (sigtermTimer) {
+      clearTimeout(sigtermTimer);
+    }
+    if (sigkillTimer) {
+      clearTimeout(sigkillTimer);
+    }
+  };
 }
 
 function parseEvent(line: string): CodexEvent | undefined {
