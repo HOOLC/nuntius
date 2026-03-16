@@ -31,31 +31,29 @@ export class DiscordAdapter {
 
   async handleTurn(envelope: DiscordEnvelope): Promise<void> {
     await envelope.deferReply();
-    const typingLease = await envelope.startTyping?.();
+    const turn: InboundTurn = {
+      platform: "discord",
+      workspaceId: envelope.workspaceId,
+      channelId: envelope.channelId,
+      threadId: envelope.threadId,
+      scope: envelope.scope,
+      userId: envelope.userId,
+      userDisplayName: envelope.userDisplayName,
+      text: envelope.text,
+      attachments: envelope.attachments ?? [],
+      repositoryId: envelope.repositoryId,
+      receivedAt: envelope.receivedAt ?? new Date().toISOString()
+    };
 
-    try {
-      const turn: InboundTurn = {
-        platform: "discord",
-        workspaceId: envelope.workspaceId,
-        channelId: envelope.channelId,
-        threadId: envelope.threadId,
-        scope: envelope.scope,
-        userId: envelope.userId,
-        userDisplayName: envelope.userDisplayName,
-        text: envelope.text,
-        attachments: envelope.attachments ?? [],
-        repositoryId: envelope.repositoryId,
-        receivedAt: envelope.receivedAt ?? new Date().toISOString()
-      };
-
-      await this.router.handleTurn(turn, new DiscordPublisher(envelope));
-    } finally {
-      await typingLease?.stop();
-    }
+    await this.router.handleTurn(turn, new DiscordPublisher(envelope));
   }
 }
 
 class DiscordPublisher implements TurnPublisher {
+  private typingLease?: {
+    stop(): Promise<void>;
+  };
+
   constructor(private readonly envelope: DiscordEnvelope) {}
 
   async publishQueued(): Promise<void> {
@@ -102,6 +100,33 @@ class DiscordPublisher implements TurnPublisher {
 
   async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
     await this.envelope.followUp(renderDiscordError(errorMessage));
+  }
+
+  async showWorkingIndicator(): Promise<void> {
+    if (this.typingLease || !this.envelope.startTyping) {
+      return;
+    }
+
+    try {
+      this.typingLease = await this.envelope.startTyping();
+    } catch {
+      // Typing failures should not abort the Discord turn.
+    }
+  }
+
+  async hideWorkingIndicator(): Promise<void> {
+    const lease = this.typingLease;
+    if (!lease) {
+      return;
+    }
+
+    this.typingLease = undefined;
+
+    try {
+      await lease.stop();
+    } catch {
+      // Typing failures should not abort the Discord turn.
+    }
   }
 }
 

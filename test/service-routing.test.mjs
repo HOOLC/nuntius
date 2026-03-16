@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -70,6 +70,74 @@ test("bound conversations route follow-up turns directly to the worker session",
   assert.equal(calls[1].sessionId, "worker-session-1");
   assert.deepEqual(secondPublisher.completed, ["Worker follow-up output."]);
   assert.ok(calls.every((call) => call.repositoryPath !== handlerDir));
+});
+
+test("worker turns expose attachment paths and return changed docx files", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-attachments-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  const attachmentDir = path.join(root, "attachments");
+  const attachmentPath = path.join(attachmentDir, "draft.docx");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+  mkdirSync(attachmentDir, { recursive: true });
+  writeFileSync(attachmentPath, "original docx");
+
+  const calls = [];
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+        assert.match(request.prompt, new RegExp(escapeRegExp(attachmentPath)));
+        writeFileSync(attachmentPath, "updated docx");
+        return {
+          sessionId: request.sessionId ?? "worker-session-attachment",
+          responseText: "Updated the attachment.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = {
+    ...buildTurn("update the attachment"),
+    attachments: [
+      {
+        id: "file-1",
+        kind: "file",
+        name: "draft.docx",
+        localPath: attachmentPath
+      }
+    ]
+  };
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createRichPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(calls[0].addDirs, [attachmentDir]);
+  assert.equal(publisher.completed.length, 1);
+  assert.deepEqual(publisher.completed[0].attachments, [
+    {
+      name: "draft.docx",
+      localPath: attachmentPath,
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    }
+  ]);
 });
 
 test("explicit rebinding clears the old worker session and routes later turns to the new repo", async (t) => {
@@ -456,6 +524,102 @@ test("interrupt commands bypass the queue and stop the active worker turn", asyn
   assert.equal(status.binding?.activeRepository?.workerSessionId, "worker-session-1");
 });
 
+test("heartbeat updates refresh the working indicator when the publisher supports it", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-heartbeat-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const originalDateNow = Date.now;
+
+  let now = 0;
+  let intervalCallback;
+
+  globalThis.setInterval = ((callback) => {
+    intervalCallback = callback;
+    return 1;
+  });
+  globalThis.clearInterval = (() => undefined);
+  Date.now = () => now;
+
+  t.after(() => {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    Date.now = originalDateNow;
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        now = 20_000;
+        intervalCallback?.();
+        await new Promise((resolve) => setImmediate(resolve));
+
+        now = 40_000;
+        intervalCallback?.();
+        await new Promise((resolve) => setImmediate(resolve));
+
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "file_change",
+            changes: [
+              {
+                path: path.join(repoDir, "README.md"),
+                kind: "update"
+              }
+            ]
+          }
+        });
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: "Done.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("inspect the repo");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  publisher.workingIndicators = [];
+  publisher.refreshWorkingIndicator = async () => {
+    publisher.workingIndicators.push("refresh");
+  };
+  publisher.hideWorkingIndicator = async () => {
+    publisher.workingIndicators.push("hide");
+  };
+
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(publisher.workingIndicators, ["refresh", "refresh", "hide"]);
+  assert.equal(
+    publisher.progress.some((message) => message.includes("still working")),
+    false
+  );
+  assert.match(publisher.progress[0], /updated `README\.md`/);
+});
+
 test("parseBridgeCommand maps clear commands to a fresh-context reset", () => {
   assert.deepEqual(parseBridgeCommand("/codex clear"), {
     kind: "reset",
@@ -547,4 +711,22 @@ function createDeferred() {
     resolve,
     reject
   };
+}
+
+function createRichPublisher() {
+  return {
+    async publishQueued() {},
+    async publishStarted() {},
+    async publishProgress() {},
+    completed: [],
+    async publishCompleted(_turn, message) {
+      this.completed.push(message);
+    },
+    async publishInterrupted() {},
+    async publishFailed() {}
+  };
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -24,14 +24,60 @@ test("duplicate long connection events are ignored", async (t) => {
   });
   bot.handleIncomingLongConnectionEvent(event);
 
-  await waitFor(() => harness.records.length === 1);
-  assert.equal(harness.records[0].kind, "message.reply");
+  await waitFor(() => harness.records.length === 2);
+  assert.deepEqual(
+    harness.records.map((record) => record.kind),
+    ["message.reply", "message.reply"]
+  );
+  assert.equal(harness.records[0].body.msg_type, "text");
+  assert.equal(readTextContent(harness.records[0]), "[Completed]\nFinished this Codex turn.");
+  assert.equal(harness.records[1].body.msg_type, "text");
+  assert.match(readTextContent(harness.records[1]), /\/codex/);
 
   harness.resetRecords();
   bot.handleIncomingLongConnectionEvent(event);
   await new Promise((resolve) => setTimeout(resolve, 25));
 
   assert.deepEqual(harness.records, []);
+});
+
+test("admin hotreload rebuilds and requests a supervisor reload", async (t) => {
+  const harness = createHarness();
+  t.after(() => harness.cleanup());
+
+  const workerMessages = [];
+  const bot = new FeishuBot({
+    isSupervisorAvailable: () => true,
+    rebuildBridge: async () => ({
+      ok: true,
+      output: "build ok"
+    }),
+    sendWorkerMessage: (message) => {
+      workerMessages.push(message);
+    }
+  });
+  await bot.refreshFeishuClient();
+
+  harness.resetRecords();
+
+  bot.handleIncomingLongConnectionEvent(
+    buildMessageEvent({
+      eventId: "evt-admin-hotreload",
+      messageId: "om-admin-1",
+      chatId: "oc-chat-admin-1",
+      chatType: "p2p",
+      text: "/codexadmin hotreload"
+    })
+  );
+
+  await waitFor(() => harness.records.length === 2);
+  assert.deepEqual(
+    harness.records.map((record) => record.kind),
+    ["message.reply", "message.reply"]
+  );
+  assert.match(readTextContent(harness.records[0]), /Rebuilding the Feishu bridge now/);
+  assert.match(readTextContent(harness.records[1]), /Hot reload requested/);
+  assert.deepEqual(workerMessages, [{ type: "request_hot_reload" }]);
 });
 
 test("group bind bootstraps a Feishu thread and thread replies reuse the worker session", async (t) => {
@@ -58,17 +104,23 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.length === 2);
+  await waitFor(() => harness.records.length === 3);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.reply"]
+    ["message.reply", "message.reply", "message.reply"]
   );
   assert.equal(harness.records[0].path, "/im/v1/messages/om-root-1/reply");
+  assert.equal(harness.records[0].body.msg_type, "text");
   assert.equal(harness.records[0].body.reply_in_thread, true);
-  assert.equal(JSON.parse(harness.records[0].body.content).text, "Codex thread");
+  assert.equal(readTextContent(harness.records[0]), "Codex thread");
   assert.equal(harness.records[1].path, "/im/v1/messages/om-root-1/reply");
+  assert.equal(harness.records[1].body.msg_type, "text");
   assert.equal(harness.records[1].body.reply_in_thread, true);
-  assert.match(JSON.parse(harness.records[1].body.content).text, /Bound this conversation to "nuntius"/);
+  assert.equal(readTextContent(harness.records[1]), "[Completed]\nFinished this Codex turn.");
+  assert.equal(harness.records[2].path, "/im/v1/messages/om-root-1/reply");
+  assert.equal(harness.records[2].body.msg_type, "text");
+  assert.equal(harness.records[2].body.reply_in_thread, true);
+  assert.match(readTextContent(harness.records[2]), /Bound this conversation to "nuntius"/);
 
   harness.resetRecords();
 
@@ -87,18 +139,22 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
   await waitFor(() => harness.records.length === 4);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.update", "message.update", "message.reply"]
+    ["message.reply", "message.reply", "message.reply", "message.reply"]
   );
   assert.equal(harness.records[0].path, "/im/v1/messages/om-root-1/reply");
+  assert.equal(harness.records[0].body.msg_type, "text");
   assert.equal(harness.records[0].body.reply_in_thread, true);
-  assert.match(JSON.parse(harness.records[0].body.content).text, /^Started/);
-  assert.equal(harness.records[1].path, "/im/v1/messages/om-status-1");
-  assert.match(JSON.parse(harness.records[1].body.content).text, /^Working/);
-  assert.match(JSON.parse(harness.records[1].body.content).text, /README\.md/);
-  assert.equal(harness.records[2].path, "/im/v1/messages/om-status-1");
-  assert.match(JSON.parse(harness.records[2].body.content).text, /^Completed/);
+  assert.match(readTextContent(harness.records[0]), /^\[Started\]/);
+  assert.equal(harness.records[1].path, "/im/v1/messages/om-root-1/reply");
+  assert.equal(harness.records[1].body.msg_type, "text");
+  assert.match(readTextContent(harness.records[1]), /^\[Working\]/);
+  assert.match(readTextContent(harness.records[1]), /README\.md/);
+  assert.equal(harness.records[2].path, "/im/v1/messages/om-root-1/reply");
+  assert.equal(harness.records[2].body.msg_type, "text");
+  assert.equal(readTextContent(harness.records[2]), "[Completed]\nFinished this Codex turn.");
   assert.equal(harness.records[3].path, "/im/v1/messages/om-root-1/reply");
-  assert.equal(JSON.parse(harness.records[3].body.content).text, "Worker summary output.");
+  assert.equal(harness.records[3].body.msg_type, "text");
+  assert.equal(readTextContent(harness.records[3]), "Worker summary output.");
 
   harness.resetRecords();
 
@@ -117,13 +173,92 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
   await waitFor(() => harness.records.length === 4);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.update", "message.update", "message.reply"]
+    ["message.reply", "message.reply", "message.reply", "message.reply"]
   );
-  assert.match(JSON.parse(harness.records[0].body.content).text, /session=worker-session/);
-  assert.equal(JSON.parse(harness.records[3].body.content).text, "Worker follow-up output.");
+  assert.equal(harness.records[0].body.msg_type, "text");
+  assert.match(readTextContent(harness.records[0]), /worker-session/);
+  assert.equal(harness.records[3].body.msg_type, "text");
+  assert.equal(readTextContent(harness.records[3]), "Worker follow-up output.");
 
   const invocations = readInvocationLog(harness.paths.invocationLogPath);
   assert.deepEqual(invocations, ["worker:new", "resume:worker-session"]);
+});
+
+test("thread file attachments are downloaded, exposed to Codex, and returned as updated files", async (t) => {
+  const harness = createHarness();
+  t.after(() => harness.cleanup());
+
+  const bot = new FeishuBot();
+  await bot.refreshFeishuClient();
+
+  harness.resetRecords();
+
+  bot.handleIncomingLongConnectionEvent(
+    buildMessageEvent({
+      eventId: "evt-root-bind-file",
+      messageId: "om-root-file",
+      chatId: "oc-chat-1",
+      chatType: "group",
+      text: "/codex bind nuntius"
+    })
+  );
+
+  await waitFor(() =>
+    harness.records.some(
+      (record) =>
+        record.kind === "message.reply" &&
+        record.body.msg_type === "text" &&
+        readTextContent(record).includes('Bound this conversation to "nuntius"')
+    )
+  );
+
+  harness.resetRecords();
+
+  bot.handleIncomingLongConnectionEvent(
+    buildMessageEvent({
+      eventId: "evt-thread-file",
+      messageId: "om-thread-file-1",
+      rootId: "om-root-file",
+      threadId: "omt-thread-1",
+      chatId: "oc-chat-1",
+      chatType: "group",
+      messageType: "file",
+      content: {
+        file_key: "file-doc-1",
+        file_name: "proposal.docx"
+      }
+    })
+  );
+
+  await waitFor(() =>
+    harness.records.some(
+      (record) => record.kind === "message.reply" && record.body.msg_type === "file"
+    )
+  );
+
+  const downloaded = harness.records.find((record) => record.kind === "message.resource.get");
+  assert.equal(downloaded?.query, "type=file");
+
+  const upload = harness.records.find((record) => record.kind === "file.upload");
+  assert.equal(upload?.body.file_type, "stream");
+  assert.equal(upload?.body.file_name, "proposal.docx");
+  assert.equal(upload?.body.file.name, "proposal.docx");
+  assert.match(upload?.body.file.text, /updated by fake codex/);
+
+  const fileReply = harness.records.find(
+    (record) => record.kind === "message.reply" && record.body.msg_type === "file"
+  );
+  assert.deepEqual(JSON.parse(fileReply.body.content), {
+    file_key: "file-uploaded-1"
+  });
+
+  const summaryReply = harness.records.find(
+    (record) =>
+      record.kind === "message.reply" &&
+      record.body.msg_type === "text" &&
+      readTextContent(record) === "Worker summary output."
+  );
+  assert.ok(summaryReply);
 });
 
 function createHarness() {
@@ -172,7 +307,7 @@ function createHarness() {
     const parsedUrl = new URL(String(url));
     const pathName = parsedUrl.pathname.replace("/open-apis", "");
     const method = (init.method ?? "GET").toUpperCase();
-    const body = init.body ? JSON.parse(String(init.body)) : undefined;
+    const body = await parseFetchBody(init.body);
     const record = {
       kind: classifyFeishuFetch(method, pathName),
       method,
@@ -201,14 +336,34 @@ function createHarness() {
       });
     }
 
+    if (record.kind === "message.resource.get") {
+      return new Response(Buffer.from("original docx"), {
+        status: 200,
+        headers: {
+          "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      });
+    }
+
     if (record.kind === "message.reply") {
-      const text = JSON.parse(record.body.content).text;
+      if (record.body.msg_type === "file") {
+        return jsonResponse({
+          code: 0,
+          msg: "ok",
+          data: {
+            message_id: "om-file-reply-1",
+            thread_id: "omt-thread-1"
+          }
+        });
+      }
+
+      const rendered = summarizeRenderedMessage(record.body);
       const messageId =
-        text === "Codex thread"
+        rendered === "Codex thread"
           ? "om-thread-starter-1"
-          : text.startsWith("Started")
+          : rendered.startsWith("[Started]")
             ? "om-status-1"
-            : text.startsWith("Bound this conversation")
+            : rendered.includes("Bound this conversation")
               ? "om-bind-confirmation"
               : "om-message-1";
 
@@ -218,6 +373,16 @@ function createHarness() {
         data: {
           message_id: messageId,
           thread_id: "omt-thread-1"
+        }
+      });
+    }
+
+    if (record.kind === "file.upload") {
+      return jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: {
+          file_key: "file-uploaded-1"
         }
       });
     }
@@ -280,10 +445,13 @@ function buildMessageEvent(input) {
       chat_id: input.chatId,
       thread_id: input.threadId,
       chat_type: input.chatType,
-      message_type: "text",
-      content: JSON.stringify({
-        text: input.text
-      }),
+      message_type: input.messageType ?? "text",
+      content: JSON.stringify(
+        input.content ??
+          {
+            text: input.text
+          }
+      ),
       mentions: input.mentions ?? []
     }
   };
@@ -299,6 +467,12 @@ if [[ "\${2:-}" == "resume" || "\${3:-}" == "resume" ]]; then
   printf '%s\\n' "resume:\${session_id}" >> ${JSON.stringify(invocationLogPath)}
 else
   printf '%s\\n' 'worker:new' >> ${JSON.stringify(invocationLogPath)}
+fi
+
+prompt="\${@: -1}"
+attachment_path="$(printf '%s' "\${prompt}" | grep -oE 'path=/[^[:space:]]+\\.docx?' | head -n1 | sed 's/^path=//' || true)"
+if [[ -n "\${attachment_path}" && -f "\${attachment_path}" ]]; then
+  printf '%s' 'updated by fake codex' >> "\${attachment_path}"
 fi
 
 if [[ -n "\${session_id}" ]]; then
@@ -322,6 +496,14 @@ function classifyFeishuFetch(method, pathName) {
 
   if (method === "GET" && pathName === "/bot/v3/info") {
     return "bot.info";
+  }
+
+  if (method === "GET" && /\/im\/v1\/messages\/[^/]+\/resources\/[^/]+$/.test(pathName)) {
+    return "message.resource.get";
+  }
+
+  if (method === "POST" && pathName === "/im/v1/files") {
+    return "file.upload";
   }
 
   if (method === "POST" && /\/im\/v1\/messages\/[^/]+\/reply$/.test(pathName)) {
@@ -350,6 +532,45 @@ function readInvocationLog(filePath) {
     .split("\n")
     .filter(Boolean)
     .map((line) => line.trim());
+}
+
+function readTextContent(record) {
+  return JSON.parse(record.body.content).text;
+}
+
+function summarizeRenderedMessage(body) {
+  return JSON.parse(body.content).text;
+}
+
+async function parseFetchBody(body) {
+  if (!body) {
+    return undefined;
+  }
+
+  if (typeof body === "string" || Buffer.isBuffer(body)) {
+    return JSON.parse(String(body));
+  }
+
+  if (typeof body.entries === "function") {
+    const parsed = {};
+    for (const [key, value] of body.entries()) {
+      if (typeof value === "string") {
+        parsed[key] = value;
+        continue;
+      }
+
+      const content = Buffer.from(await value.arrayBuffer()).toString("utf8");
+      parsed[key] = {
+        name: value.name,
+        type: value.type,
+        text: content
+      };
+    }
+
+    return parsed;
+  }
+
+  return body;
 }
 
 async function waitFor(predicate, timeoutMs = 2_000) {

@@ -1,9 +1,20 @@
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import readline from "node:readline";
+import { fork, spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import * as Lark from "@larksuiteoapi/node-sdk";
 
-import { FeishuAdapter, type FeishuEnvelope } from "./adapters/feishu.js";
+import {
+  FeishuAdapter,
+  renderFeishuNotice,
+  renderFeishuTextMessage,
+  type FeishuChatMessage,
+  type FeishuEnvelope
+} from "./adapters/feishu.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
 import type { BridgeCommand } from "./interaction-router.js";
 import { parseBridgeCommand } from "./interaction-router.js";
@@ -11,6 +22,13 @@ import { loadFeishuBotConfig, type FeishuBotConfig } from "./feishu-config.js";
 import type { Attachment, InboundTurn } from "./domain.js";
 
 const EVENT_DEDUP_TTL_MS = 10 * 60_000;
+const WORKER_BOOT_TIMEOUT_MS = 30_000;
+const WORKER_SHUTDOWN_TIMEOUT_MS = 10_000;
+const WORKER_RESPAWN_DELAY_MS = 1_000;
+const BUILD_OUTPUT_LINE_LIMIT = 40;
+const BUILD_OUTPUT_CHAR_LIMIT = 3500;
+const BRIDGE_PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const FEISHU_ATTACHMENT_ROOT = path.join(os.tmpdir(), "nuntius-feishu-attachments");
 
 interface FeishuBotInfoResponse {
   code: number;
@@ -36,6 +54,17 @@ interface FeishuMessageResponse {
   data?: {
     message_id?: string;
     thread_id?: string;
+  };
+}
+
+interface FeishuFileUploadResponse {
+  code: number;
+  msg: string;
+  error?: {
+    log_id?: string;
+  };
+  data?: {
+    file_key?: string;
   };
 }
 
@@ -103,6 +132,35 @@ interface FlattenPostContext {
   mentionNames: Map<string, string>;
 }
 
+type FeishuWorkerMode = "probe" | "run";
+
+type FeishuWorkerToSupervisorMessage =
+  | {
+      type: "probe_ready";
+    }
+  | {
+      type: "ready";
+    }
+  | {
+      type: "request_hot_reload";
+    }
+  | {
+      type: "request_restart";
+    };
+
+type FeishuSupervisorToWorkerMessage = {
+  type: "shutdown";
+};
+
+interface FeishuBotRuntime {
+  isSupervisorAvailable?: () => boolean;
+  rebuildBridge?: () => Promise<{
+    ok: boolean;
+    output: string;
+  }>;
+  sendWorkerMessage?: (message: FeishuWorkerToSupervisorMessage) => void;
+}
+
 export class FeishuBot {
   private readonly bridgeRuntime = createBridgeRuntime();
   private feishuConfig = loadFeishuBotConfig();
@@ -111,6 +169,8 @@ export class FeishuBot {
   private readonly recentMessageIds = new Map<string, number>();
   private longConnection?: Lark.WSClient;
   private botOpenId?: string;
+
+  constructor(private readonly runtime: FeishuBotRuntime = {}) {}
 
   async start(): Promise<void> {
     const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
@@ -206,6 +266,7 @@ export class FeishuBot {
 
     const target = buildBaseConversationTarget(workspaceId, message);
     const parsedMessage = parseFeishuMessage(message, this.botOpenId);
+    const attachments = await this.materializeAttachments(message, parsedMessage.attachments);
     const receivedAt = feishuTimestampToIso(message.create_time);
     const trimmedText = parsedMessage.text.trim();
 
@@ -224,7 +285,7 @@ export class FeishuBot {
         target,
         userId,
         text: trimmedText,
-        attachments: parsedMessage.attachments,
+        attachments,
         receivedAt
       });
       return;
@@ -235,7 +296,7 @@ export class FeishuBot {
         target,
         userId,
         text: trimmedText,
-        attachments: parsedMessage.attachments,
+        attachments,
         mentionedBot: parsedMessage.mentionedBot,
         receivedAt
       });
@@ -246,7 +307,7 @@ export class FeishuBot {
       target,
       userId,
       text: trimmedText,
-      attachments: parsedMessage.attachments,
+      attachments,
       mentionedBot: parsedMessage.mentionedBot,
       receivedAt
     });
@@ -380,7 +441,7 @@ export class FeishuBot {
     text: string;
   }): Promise<void> {
     if (!this.isAdminUser(input.userId)) {
-      await this.postConversationMessage(input.target, "You are not allowed to use /codexadmin.");
+      await this.postAdminMessage(input.target, "You are not allowed to use /codexadmin.");
       return;
     }
 
@@ -392,11 +453,11 @@ export class FeishuBot {
       switch (command) {
         case "":
         case "help":
-          await this.postConversationMessage(input.target, buildFeishuAdminHelp());
+          await this.postAdminMessage(input.target, buildFeishuAdminHelp());
           return;
         case "status": {
           const snapshot = this.bridgeRuntime.getRepositoryRegistrySnapshot();
-          await this.postConversationMessage(
+          await this.postAdminMessage(
             input.target,
             [
               "Codex admin status:",
@@ -407,6 +468,7 @@ export class FeishuBot {
               `- Allowed users configured: ${this.feishuConfig.allowedOpenIds.length || "all"}`,
               `- Admin users configured: ${this.feishuConfig.adminOpenIds.length}`,
               "- Event delivery: long connection",
+              `- Hot reload available: ${String(this.isSupervisorAvailable())}`,
               `- API base URL: ${this.feishuConfig.apiBaseUrl}`,
               `- Restart allowed: ${String(this.feishuConfig.allowProcessRestart)}`
             ].join("\n")
@@ -433,7 +495,7 @@ export class FeishuBot {
             notes.push("Feishu long connection settings changed and the client was restarted.");
           }
 
-          await this.postConversationMessage(
+          await this.postAdminMessage(
             input.target,
             [
               "Reloaded runtime config.",
@@ -450,16 +512,66 @@ export class FeishuBot {
           );
           return;
         }
+        case "hotreload": {
+          await this.postAdminMessage(
+            input.target,
+            "Rebuilding the Feishu bridge now. If the build succeeds, I will request a hot reload next."
+          );
+
+          const buildResult = await this.rebuildBridge();
+          if (!buildResult.ok) {
+            await this.postAdminMessage(
+              input.target,
+              formatScriptFailure("Build", buildResult.output, "No build output was captured.")
+            );
+            return;
+          }
+
+          if (!this.isSupervisorAvailable()) {
+            await this.postAdminMessage(
+              input.target,
+              [
+                "Build succeeded, but hot reload is unavailable because the bot is not running under the bundled supervisor.",
+                formatScriptSuccessSummary("Build output", buildResult.output, "Build completed successfully.")
+              ].join("\n\n")
+            );
+            return;
+          }
+
+          await this.postAdminMessage(
+            input.target,
+            [
+              "Build succeeded. Hot reload requested.",
+              "Existing session bindings will be reconciled when the new worker starts.",
+              formatScriptSuccessSummary("Build output", buildResult.output, "Build completed successfully.")
+            ].join("\n\n")
+          );
+          this.sendWorkerMessage({
+            type: "request_hot_reload"
+          });
+          return;
+        }
         case "restart":
           if (!this.feishuConfig.allowProcessRestart) {
-            await this.postConversationMessage(
+            await this.postAdminMessage(
               input.target,
               "Process restart is disabled. Set feishu.allow_process_restart=true in nuntius.toml to enable it."
             );
             return;
           }
 
-          await this.postConversationMessage(
+          if (this.isSupervisorAvailable()) {
+            await this.postAdminMessage(
+              input.target,
+              "Restart requested. The supervisor will exit now; start it again or use an external service manager."
+            );
+            this.sendWorkerMessage({
+              type: "request_restart"
+            });
+            return;
+          }
+
+          await this.postAdminMessage(
             input.target,
             "Restart requested. The process will exit now; an external supervisor must start it again."
           );
@@ -468,13 +580,13 @@ export class FeishuBot {
           }, 250);
           return;
         default:
-          await this.postConversationMessage(
+          await this.postAdminMessage(
             input.target,
             `Unsupported /codexadmin command "${command}".\n${buildFeishuAdminHelp()}`
           );
       }
     } catch (error) {
-      await this.postConversationMessage(input.target, formatTopLevelError(error));
+      await this.postAdminMessage(input.target, formatTopLevelError(error));
     }
   }
 
@@ -485,7 +597,7 @@ export class FeishuBot {
 
     const starter = await this.feishuApi.replyMessage({
       messageId: target.replyMessageId,
-      text: "Codex thread",
+      message: renderFeishuTextMessage("Codex thread"),
       replyInThread: true
     });
 
@@ -498,6 +610,45 @@ export class FeishuBot {
       scope: "thread",
       threadId: starter.threadId
     };
+  }
+
+  private async materializeAttachments(
+    message: FeishuMessageEventPayload,
+    attachments: Attachment[]
+  ): Promise<Attachment[]> {
+    const resourceType = mapFeishuMessageResourceType(message.message_type);
+    if (!resourceType || attachments.length === 0) {
+      return attachments;
+    }
+
+    const attachmentDir = path.join(
+      FEISHU_ATTACHMENT_ROOT,
+      sanitizePathComponent(message.message_id)
+    );
+    await fs.mkdir(attachmentDir, {
+      recursive: true
+    });
+
+    return Promise.all(
+      attachments.map(async (attachment, index) => {
+        const fileName = sanitizeAttachmentFileName(
+          attachment.name ?? `${attachment.kind}-${index + 1}${inferAttachmentExtension(resourceType)}`
+        );
+        const localPath = path.join(attachmentDir, `${index + 1}-${fileName}`);
+        const downloaded = await this.feishuApi.downloadMessageResource({
+          messageId: message.message_id,
+          fileKey: attachment.id,
+          type: resourceType,
+          destinationPath: localPath
+        });
+
+        return {
+          ...attachment,
+          localPath,
+          mimeType: attachment.mimeType ?? downloaded.contentType ?? inferMimeTypeFromFilename(fileName)
+        };
+      })
+    );
   }
 
   private buildFeishuEnvelope(input: {
@@ -521,20 +672,26 @@ export class FeishuBot {
       updateMessage: async (messageId, message) => {
         await this.feishuApi.updateMessage({
           messageId,
-          text: message
+          message
         });
+      },
+      uploadFile: async (upload) => {
+        const fileKey = await this.feishuApi.uploadFile(upload);
+        return {
+          fileKey
+        };
       }
     };
   }
 
   private async postConversationMessage(
     target: FeishuConversationTarget,
-    message: string
+    message: FeishuChatMessage
   ): Promise<{ messageId?: string }> {
     if (target.scope === "thread" && target.replyMessageId) {
       const result = await this.feishuApi.replyMessage({
         messageId: target.replyMessageId,
-        text: message,
+        message,
         replyInThread: true
       });
       return {
@@ -545,7 +702,7 @@ export class FeishuBot {
     if (target.replyMessageId) {
       const result = await this.feishuApi.replyMessage({
         messageId: target.replyMessageId,
-        text: message,
+        message,
         replyInThread: false
       });
       return {
@@ -556,18 +713,53 @@ export class FeishuBot {
     const result = await this.feishuApi.sendMessage({
       receiveId: target.channelId,
       receiveIdType: "chat_id",
-      text: message
+      message
     });
     return {
       messageId: result.messageId
     };
   }
 
+  private async postConversationNotice(
+    target: FeishuConversationTarget,
+    title: string,
+    body: string
+  ): Promise<void> {
+    await this.postConversationMessage(target, renderFeishuNotice(title, body));
+  }
+
+  private async postAdminMessage(
+    target: FeishuConversationTarget,
+    body: string
+  ): Promise<void> {
+    await this.postConversationNotice(target, "Codex Admin", body);
+  }
+
   private async postConversationFailure(
     target: FeishuConversationTarget,
     message: string
   ): Promise<void> {
-    await this.postConversationMessage(target, message);
+    await this.postConversationNotice(target, "Codex", message);
+  }
+
+  private isSupervisorAvailable(): boolean {
+    return this.runtime.isSupervisorAvailable?.() ?? typeof process.send === "function";
+  }
+
+  private async rebuildBridge(): Promise<{
+    ok: boolean;
+    output: string;
+  }> {
+    return this.runtime.rebuildBridge?.() ?? rebuildFeishuBridge();
+  }
+
+  private sendWorkerMessage(message: FeishuWorkerToSupervisorMessage): void {
+    if (this.runtime.sendWorkerMessage) {
+      this.runtime.sendWorkerMessage(message);
+      return;
+    }
+
+    sendWorkerMessage(message);
   }
 
   private isAllowedUser(userId: string): boolean {
@@ -619,17 +811,15 @@ class FeishuApiClient {
   async sendMessage(input: {
     receiveId: string;
     receiveIdType: "chat_id" | "open_id" | "user_id" | "union_id" | "email";
-    text: string;
+    message: FeishuChatMessage;
   }): Promise<{ messageId?: string; threadId?: string }> {
     const response = await this.callApi<FeishuMessageResponse>(
       "POST",
       `/im/v1/messages?receive_id_type=${encodeURIComponent(input.receiveIdType)}`,
       {
         receive_id: input.receiveId,
-        msg_type: "text",
-        content: JSON.stringify({
-          text: input.text
-        }),
+        msg_type: input.message.msgType,
+        content: input.message.content,
         uuid: randomUuid()
       }
     );
@@ -642,17 +832,15 @@ class FeishuApiClient {
 
   async replyMessage(input: {
     messageId: string;
-    text: string;
+    message: FeishuChatMessage;
     replyInThread: boolean;
   }): Promise<{ messageId?: string; threadId?: string }> {
     const response = await this.callApi<FeishuMessageResponse>(
       "POST",
       `/im/v1/messages/${encodeURIComponent(input.messageId)}/reply`,
       {
-        msg_type: "text",
-        content: JSON.stringify({
-          text: input.text
-        }),
+        msg_type: input.message.msgType,
+        content: input.message.content,
         reply_in_thread: input.replyInThread,
         uuid: randomUuid()
       }
@@ -666,18 +854,88 @@ class FeishuApiClient {
 
   async updateMessage(input: {
     messageId: string;
-    text: string;
+    message: FeishuChatMessage;
   }): Promise<void> {
     await this.callApi<FeishuMessageResponse>(
       "PUT",
       `/im/v1/messages/${encodeURIComponent(input.messageId)}`,
       {
-        msg_type: "text",
-        content: JSON.stringify({
-          text: input.text
-        })
+        msg_type: input.message.msgType,
+        content: input.message.content
       }
     );
+  }
+
+  async downloadMessageResource(input: {
+    messageId: string;
+    fileKey: string;
+    type: "audio" | "file" | "image" | "media";
+    destinationPath: string;
+  }): Promise<{ contentType?: string }> {
+    const accessToken = await this.getTenantAccessToken();
+    const resourceUrl = new URL(
+      joinFeishuApiUrl(
+        this.config.apiBaseUrl,
+        `/im/v1/messages/${encodeURIComponent(input.messageId)}/resources/${encodeURIComponent(input.fileKey)}`
+      )
+    );
+    resourceUrl.searchParams.set("type", input.type);
+
+    const response = await fetch(resourceUrl, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${accessToken}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Feishu API message resource download failed with HTTP ${response.status}.`);
+    }
+
+    const body = Buffer.from(await response.arrayBuffer());
+    await fs.writeFile(input.destinationPath, body);
+    return {
+      contentType: response.headers.get("content-type") ?? undefined
+    };
+  }
+
+  async uploadFile(input: {
+    localPath: string;
+    name: string;
+    mimeType?: string;
+  }): Promise<string> {
+    const accessToken = await this.getTenantAccessToken();
+    const body = await fs.readFile(input.localPath);
+    const form = new FormData();
+    form.set("file_type", resolveFeishuUploadFileType(input.name));
+    form.set("file_name", input.name);
+    form.set(
+      "file",
+      new Blob([body], {
+        type: input.mimeType ?? "application/octet-stream"
+      }),
+      input.name
+    );
+
+    const response = await fetch(joinFeishuApiUrl(this.config.apiBaseUrl, "/im/v1/files"), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`
+      },
+      body: form
+    });
+
+    if (!response.ok) {
+      throw new Error(`Feishu API /im/v1/files failed with HTTP ${response.status}.`);
+    }
+
+    const parsed = (await response.json()) as FeishuFileUploadResponse;
+    if (parsed.code !== 0 || !parsed.data?.file_key) {
+      const logId = parsed.error?.log_id ? ` log_id=${parsed.error.log_id}` : "";
+      throw new Error(`Feishu API /im/v1/files failed: ${parsed.msg}.${logId}`);
+    }
+
+    return parsed.data.file_key;
   }
 
   private async callApi<T extends { code: number; msg: string; error?: { log_id?: string } }>(
@@ -1055,17 +1313,86 @@ function randomUuid(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
+function mapFeishuMessageResourceType(
+  messageType: string | undefined
+): "audio" | "file" | "image" | "media" | undefined {
+  if (messageType === "audio" || messageType === "file" || messageType === "image" || messageType === "media") {
+    return messageType;
+  }
+
+  return undefined;
+}
+
+function sanitizePathComponent(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]+/g, "_");
+}
+
+function sanitizeAttachmentFileName(value: string): string {
+  const trimmed = path.basename(value).trim();
+  if (!trimmed) {
+    return "attachment.bin";
+  }
+
+  return trimmed.replace(/[^A-Za-z0-9._ -]+/g, "_");
+}
+
+function inferAttachmentExtension(resourceType: "audio" | "file" | "image" | "media"): string {
+  switch (resourceType) {
+    case "audio":
+      return ".opus";
+    case "image":
+      return ".png";
+    case "media":
+      return ".mp4";
+    case "file":
+      return ".bin";
+  }
+}
+
+function inferMimeTypeFromFilename(fileName: string): string | undefined {
+  const extension = path.extname(fileName).toLowerCase();
+  switch (extension) {
+    case ".doc":
+      return "application/msword";
+    case ".docx":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case ".pdf":
+      return "application/pdf";
+    default:
+      return undefined;
+  }
+}
+
+function resolveFeishuUploadFileType(fileName: string): "doc" | "pdf" | "ppt" | "stream" | "xls" {
+  const extension = path.extname(fileName).toLowerCase();
+  switch (extension) {
+    case ".doc":
+      return "doc";
+    case ".pdf":
+      return "pdf";
+    case ".ppt":
+    case ".pptx":
+      return "ppt";
+    case ".xls":
+    case ".xlsx":
+      return "xls";
+    default:
+      return "stream";
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null;
 }
 
 function buildFeishuAdminHelp(): string {
   return [
-    "Codex admin commands:",
-    "/codexadmin status",
-    "/codexadmin reloadconfig",
-    "/codexadmin restart",
-    "/codexadmin help"
+    "Available admin commands:",
+    "- `/codexadmin status`",
+    "- `/codexadmin reloadconfig`",
+    "- `/codexadmin hotreload`",
+    "- `/codexadmin restart`",
+    "- `/codexadmin help`"
   ].join("\n");
 }
 
@@ -1107,9 +1434,467 @@ function formatSessionReconciliationLines(result: {
   ];
 }
 
-export async function main(): Promise<void> {
+function isWorkerToSupervisorMessage(
+  value: unknown
+): value is FeishuWorkerToSupervisorMessage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    (value.type === "probe_ready" ||
+      value.type === "ready" ||
+      value.type === "request_hot_reload" ||
+      value.type === "request_restart")
+  );
+}
+
+function isSupervisorToWorkerMessage(
+  value: unknown
+): value is FeishuSupervisorToWorkerMessage {
+  return typeof value === "object" && value !== null && "type" in value && value.type === "shutdown";
+}
+
+function sendWorkerMessage(message: FeishuWorkerToSupervisorMessage): void {
+  if (typeof process.send !== "function") {
+    return;
+  }
+
+  process.send(message);
+}
+
+async function rebuildFeishuBridge(): Promise<{
+  ok: boolean;
+  output: string;
+}> {
+  return runBridgeScript("build");
+}
+
+async function runBridgeScript(scriptName: string): Promise<{
+  ok: boolean;
+  output: string;
+}> {
+  const child = spawn(getNpmCommand(), ["run", scriptName], {
+    cwd: BRIDGE_PROJECT_ROOT,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  const lines: string[] = [];
+  const appendLine = (line: string): void => {
+    if (!line.trim()) {
+      return;
+    }
+
+    lines.push(line);
+    if (lines.length > BUILD_OUTPUT_LINE_LIMIT) {
+      lines.splice(0, lines.length - BUILD_OUTPUT_LINE_LIMIT);
+    }
+  };
+
+  const stdoutReader = readline.createInterface({
+    input: child.stdout,
+    crlfDelay: Infinity
+  });
+
+  const stdoutTask = (async () => {
+    for await (const line of stdoutReader) {
+      appendLine(line);
+    }
+  })();
+
+  const stderrReader = readline.createInterface({
+    input: child.stderr,
+    crlfDelay: Infinity
+  });
+
+  const stderrTask = (async () => {
+    for await (const line of stderrReader) {
+      appendLine(line);
+    }
+  })();
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code ?? 1));
+  });
+
+  await Promise.all([stdoutTask, stderrTask]);
+
+  return {
+    ok: exitCode === 0,
+    output: clipScriptOutput(lines.join("\n"))
+  };
+}
+
+function getNpmCommand(): string {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+function clipScriptOutput(output: string): string {
+  const trimmed = output.trim();
+  if (trimmed.length <= BUILD_OUTPUT_CHAR_LIMIT) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(trimmed.length - BUILD_OUTPUT_CHAR_LIMIT)}\n[truncated]`;
+}
+
+function formatScriptFailure(label: string, output: string, fallback: string): string {
+  return [
+    `[${label} failed]`,
+    trimTextPayload(output || fallback)
+  ].join("\n");
+}
+
+function formatScriptSuccessSummary(label: string, output: string, fallback: string): string {
+  return [
+    `${label}:`,
+    trimTextPayload(output || fallback)
+  ].join("\n");
+}
+
+function trimTextPayload(value: string): string {
+  return value.replace(/```/g, "`\u200b``").trim();
+}
+
+class FeishuBotSupervisor {
+  private readonly workerModulePath = fileURLToPath(import.meta.url);
+  private worker?: ChildProcess;
+  private shuttingDown = false;
+  private reloading = false;
+
+  async start(): Promise<void> {
+    this.installSignalHandlers();
+    this.worker = await this.startRunWorker("initial startup");
+  }
+
+  private installSignalHandlers(): void {
+    process.on("SIGHUP", () => {
+      void this.hotReload("SIGHUP");
+    });
+
+    process.on("SIGINT", () => {
+      void this.shutdownAndExit(0);
+    });
+
+    process.on("SIGTERM", () => {
+      void this.shutdownAndExit(0);
+    });
+  }
+
+  private async hotReload(reason: string): Promise<void> {
+    if (this.shuttingDown) {
+      return;
+    }
+
+    if (this.reloading) {
+      console.log(`Ignoring hot reload request while a reload is already in progress: ${reason}.`);
+      return;
+    }
+
+    this.reloading = true;
+
+    try {
+      console.log(`Hot reload requested: ${reason}. Probing the latest Feishu worker build.`);
+      await this.runProbe();
+      console.log("Probe succeeded. Replacing the active Feishu worker.");
+
+      const previousWorker = this.worker;
+      if (previousWorker) {
+        await this.stopWorker(previousWorker, "hot reload");
+      }
+
+      this.worker = await this.startRunWorker("hot reload");
+      console.log("Hot reload completed.");
+    } catch (error) {
+      const message = error instanceof Error ? error.stack ?? error.message : String(error);
+      console.error(`Hot reload failed:\n${message}`);
+    } finally {
+      this.reloading = false;
+    }
+  }
+
+  private async shutdownAndExit(exitCode: number): Promise<void> {
+    if (this.shuttingDown) {
+      return;
+    }
+
+    this.shuttingDown = true;
+
+    try {
+      if (this.worker) {
+        const activeWorker = this.worker;
+        this.worker = undefined;
+        await this.stopWorker(activeWorker, "supervisor shutdown");
+      }
+    } finally {
+      process.exit(exitCode);
+    }
+  }
+
+  private async startRunWorker(reason: string): Promise<ChildProcess> {
+    const child = this.spawnWorker("run");
+    this.attachRuntimeHandlers(child);
+    await this.waitForWorkerReady(child, "ready");
+    console.log(`Feishu worker ${child.pid ?? "unknown"} started for ${reason}.`);
+    return child;
+  }
+
+  private async runProbe(): Promise<void> {
+    const probe = this.spawnWorker("probe");
+    let probeReady = false;
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Timed out while probing the Feishu worker."));
+      }, WORKER_BOOT_TIMEOUT_MS);
+
+      probe.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+
+      probe.on("message", (message) => {
+        if (isWorkerToSupervisorMessage(message) && message.type === "probe_ready") {
+          probeReady = true;
+        }
+      });
+
+      probe.once("exit", (code, signal) => {
+        clearTimeout(timeout);
+
+        if (probeReady && code === 0) {
+          resolve();
+          return;
+        }
+
+        reject(
+          new Error(
+            `Probe worker exited before confirming readiness (code=${code ?? "null"}, signal=${signal ?? "null"}).`
+          )
+        );
+      });
+    });
+  }
+
+  private attachRuntimeHandlers(child: ChildProcess): void {
+    child.on("message", (message) => {
+      if (!isWorkerToSupervisorMessage(message)) {
+        return;
+      }
+
+      this.handleWorkerMessage(child, message);
+    });
+
+    child.once("exit", (code, signal) => {
+      this.handleWorkerExit(child, code, signal);
+    });
+  }
+
+  private handleWorkerMessage(child: ChildProcess, message: FeishuWorkerToSupervisorMessage): void {
+    switch (message.type) {
+      case "ready":
+      case "probe_ready":
+        return;
+      case "request_hot_reload":
+        void this.hotReload(`admin request from worker ${child.pid ?? "unknown"}`);
+        return;
+      case "request_restart":
+        console.log("Supervisor exit requested by Feishu admin command.");
+        void this.shutdownAndExit(75);
+        return;
+    }
+  }
+
+  private handleWorkerExit(
+    child: ChildProcess,
+    code: number | null,
+    signal: NodeJS.Signals | null
+  ): void {
+    if (child !== this.worker) {
+      return;
+    }
+
+    this.worker = undefined;
+
+    if (this.shuttingDown) {
+      return;
+    }
+
+    if (this.reloading) {
+      console.log(
+        `Feishu worker ${child.pid ?? "unknown"} exited during reload (code=${code ?? "null"}, signal=${signal ?? "null"}).`
+      );
+      return;
+    }
+
+    console.error(
+      `Feishu worker ${child.pid ?? "unknown"} exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"}).`
+    );
+
+    setTimeout(() => {
+      if (this.shuttingDown || this.reloading || this.worker) {
+        return;
+      }
+
+      void this.startRunWorker("crash recovery")
+        .then((worker) => {
+          this.worker = worker;
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.stack ?? error.message : String(error);
+          console.error(`Failed to restart Feishu worker after crash:\n${message}`);
+        });
+    }, WORKER_RESPAWN_DELAY_MS);
+  }
+
+  private spawnWorker(mode: FeishuWorkerMode): ChildProcess {
+    return fork(this.workerModulePath, [], {
+      env: {
+        ...process.env,
+        NUNTIUS_FEISHU_WORKER_MODE: mode
+      },
+      stdio: ["inherit", "inherit", "inherit", "ipc"]
+    });
+  }
+
+  private async waitForWorkerReady(
+    child: ChildProcess,
+    expectedMessageType: Extract<FeishuWorkerToSupervisorMessage["type"], "ready">
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Timed out while waiting for the Feishu worker to become ready."));
+      }, WORKER_BOOT_TIMEOUT_MS);
+
+      const cleanup = (): void => {
+        clearTimeout(timeout);
+        child.off("message", handleMessage);
+        child.off("error", handleError);
+        child.off("exit", handleExit);
+      };
+
+      const handleMessage = (message: unknown): void => {
+        if (!isWorkerToSupervisorMessage(message)) {
+          return;
+        }
+
+        if (message.type === expectedMessageType) {
+          cleanup();
+          resolve();
+        }
+      };
+
+      const handleError = (error: Error): void => {
+        cleanup();
+        reject(error);
+      };
+
+      const handleExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+        cleanup();
+        reject(
+          new Error(
+            `Feishu worker exited before readiness (code=${code ?? "null"}, signal=${signal ?? "null"}).`
+          )
+        );
+      };
+
+      child.on("message", handleMessage);
+      child.once("error", handleError);
+      child.once("exit", handleExit);
+    });
+  }
+
+  private async stopWorker(child: ChildProcess, reason: string): Promise<void> {
+    if (child.exitCode !== null || child.killed) {
+      return;
+    }
+
+    console.log(`Stopping Feishu worker ${child.pid ?? "unknown"}: ${reason}.`);
+
+    await new Promise<void>((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timeout);
+        child.off("exit", handleExit);
+        child.off("error", handleError);
+        resolve();
+      };
+
+      const handleExit = (): void => {
+        finish();
+      };
+
+      const handleError = (): void => {
+        finish();
+      };
+
+      const timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+      }, WORKER_SHUTDOWN_TIMEOUT_MS);
+
+      child.once("exit", handleExit);
+      child.once("error", handleError);
+
+      if (child.connected) {
+        child.send({
+          type: "shutdown"
+        } satisfies FeishuSupervisorToWorkerMessage);
+        return;
+      }
+
+      child.kill("SIGTERM");
+    });
+  }
+}
+
+function installSupervisorMessageHandler(bot: FeishuBot): void {
+  process.on("message", (message) => {
+    if (!isSupervisorToWorkerMessage(message)) {
+      return;
+    }
+
+    if (message.type === "shutdown") {
+      void bot.stop().finally(() => {
+        process.exit(0);
+      });
+    }
+  });
+}
+
+function resolveWorkerMode(raw: string | undefined): FeishuWorkerMode | undefined {
+  if (raw === "run" || raw === "probe") {
+    return raw;
+  }
+
+  return undefined;
+}
+
+async function startFeishuWorker(mode: FeishuWorkerMode): Promise<void> {
   const bot = new FeishuBot();
+  installSupervisorMessageHandler(bot);
+
+  if (mode === "probe") {
+    await bot.refreshFeishuClient();
+    sendWorkerMessage({
+      type: "probe_ready"
+    });
+    return;
+  }
+
   await bot.start();
+  sendWorkerMessage({
+    type: "ready"
+  });
+}
+
+export async function main(): Promise<void> {
+  const workerMode = resolveWorkerMode(process.env.NUNTIUS_FEISHU_WORKER_MODE);
+  if (workerMode) {
+    await startFeishuWorker(workerMode);
+    return;
+  }
+
+  const supervisor = new FeishuBotSupervisor();
+  await supervisor.start();
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

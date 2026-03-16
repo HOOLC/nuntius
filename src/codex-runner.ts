@@ -172,6 +172,7 @@ function buildResumeArgs(request: CodexTurnRequest): string[] {
   }
 
   appendConfigArgs(args, request);
+  appendAddDirArgs(args, request.addDirs);
   args.push(request.sessionId, request.prompt);
   return args;
 }

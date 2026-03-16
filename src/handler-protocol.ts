@@ -1,3 +1,4 @@
+import { formatAttachmentsForPrompt } from "./attachments.js";
 import type { RepositoryTarget } from "./config.js";
 import type { ConversationBinding, InboundTurn } from "./domain.js";
 
@@ -60,7 +61,12 @@ export function buildHandlerUserPrompt(input: {
     `- Available repositories: ${formatRepositoryList(availableRepositories)}`,
     "",
     "Latest user message:",
-    turn.text
+    turn.text || "(no text)",
+    "",
+    "Attachments visible to this turn:",
+    ...formatAttachmentsForPrompt(turn.attachments),
+    "",
+    "If attachments are listed with local paths, you may inspect them from those paths before deciding."
   ];
 
   return lines.join("\n");

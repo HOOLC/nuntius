@@ -9,6 +9,7 @@ export interface Attachment {
   name?: string;
   mimeType?: string;
   url?: string;
+  localPath?: string;
 }
 
 export interface InboundTurn {
@@ -56,6 +57,7 @@ export interface ConversationBinding {
   handlerSessionId?: string;
   handlerConfig?: HandlerSessionBinding;
   activeRepository?: RepositoryBinding;
+  attachments?: Attachment[];
   createdByUserId: string;
   createdAt: string;
   updatedAt: string;
@@ -73,10 +75,17 @@ export interface CodexTurnResult {
   stderrLines: string[];
 }
 
+export interface OutboundAttachment {
+  name: string;
+  localPath: string;
+  mimeType?: string;
+}
+
 export interface OutboundMessage {
   text: string;
   sessionId?: string;
   truncated?: boolean;
+  attachments?: OutboundAttachment[];
 }
 
 export function toConversationKey(turn: InboundTurn): ConversationKey {

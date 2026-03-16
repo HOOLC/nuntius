@@ -43,6 +43,9 @@ Recommended permissions:
 - `im:message.group_at_msg:readonly`
 - `im:message:send`
 - `im:message:update`
+- `im:resource`
+
+`im:resource` is needed if you want the bot to download inbound file attachments from Feishu and upload modified files back into the conversation. The upload API also documents the newer `im:resource:upload` scope, but `im:resource` covers the end-to-end attachment flow used by nuntius.
 
 Event subscription:
 
@@ -82,6 +85,7 @@ npm run start
 
 - `/codexadmin status`
 - `/codexadmin reloadconfig`
+- `/codexadmin hotreload`
 - `/codexadmin restart`
 - `/codexadmin help`
 
@@ -91,12 +95,21 @@ npm run start
 - Mention the bot in a group message to create a dedicated Feishu thread automatically
 - Reply inside that Feishu thread to continue the same handler or worker session
 
+### Document Attachments
+
+- In a DM or an already-bound thread, send a `doc` or `docx` file and then tell Codex what to change
+- nuntius downloads the attachment to a local working path and exposes that path to Codex for the turn
+- If Codex modifies an attached `.doc` or `.docx` in place, or writes a new `.doc`/`.docx` beside it in the same attachment directory, nuntius uploads that file back to Feishu as a file message
+- Feishu file uploads are limited to 30 MB; larger returned documents will fail to upload and the bot will post an error in the thread instead
+
 ## Notes
 
 - If `feishu.allowed_open_ids` is set, only those Feishu users can talk to the bot.
 - If `feishu.admin_open_ids` is set, only those users can run `/codexadmin`.
 - Root group messages only trigger the bot when they start with `/codex` or mention the bot.
 - Persistent work in a group is moved into a Feishu thread automatically; later replies in that thread reuse the same bound worker session.
+- File attachments received in a conversation remain available to later turns in that conversation unless you clear the binding with `/codex reset binding` or `/codex reset all`.
 - `/codexadmin reloadconfig` reloads the bridge config and repository registry in-process.
+- `/codexadmin hotreload` runs `npm run build`, probes the rebuilt Feishu worker, then swaps the active worker when the bot is running under the bundled supervisor started by `npm run feishu:start` or `npm run start`.
 - `/codexadmin restart` only exits the process. Use systemd, Docker restart policy, or another supervisor to bring it back up.
 - There is no Feishu callback URL to keep in sync because events are received over the SDK's long connection client.

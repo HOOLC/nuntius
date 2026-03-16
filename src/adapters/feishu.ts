@@ -8,6 +8,11 @@ import { buildCodexNetworkAccessStartNote } from "../codex-network-access.js";
 import type { InteractionRouter } from "../interaction-router.js";
 import type { TurnPublisher } from "../service.js";
 
+export interface FeishuChatMessage {
+  msgType: "file" | "interactive" | "text";
+  content: string;
+}
+
 export interface FeishuEnvelope {
   workspaceId: string;
   channelId: string;
@@ -20,8 +25,13 @@ export interface FeishuEnvelope {
   repositoryId?: string;
   receivedAt?: string;
   acknowledge: () => Promise<void>;
-  postMessage: (message: string) => Promise<{ messageId?: string }>;
-  updateMessage?: (messageId: string, message: string) => Promise<void>;
+  postMessage: (message: FeishuChatMessage) => Promise<{ messageId?: string }>;
+  updateMessage?: (messageId: string, message: FeishuChatMessage) => Promise<void>;
+  uploadFile?: (input: {
+    localPath: string;
+    name: string;
+    mimeType?: string;
+  }) => Promise<{ fileKey: string }>;
 }
 
 export class FeishuAdapter {
@@ -49,12 +59,14 @@ export class FeishuAdapter {
 }
 
 class FeishuPublisher implements TurnPublisher {
-  private statusMessageId?: string;
+  private workingPlaceholderMessageId?: string;
 
   constructor(private readonly envelope: FeishuEnvelope) {}
 
   async publishQueued(): Promise<void> {
-    await this.setStatusMessage("Queued", "Queued behind the active Codex turn for this conversation.");
+    await this.envelope.postMessage(
+      renderFeishuStatus("Queued", "Queued behind the active Codex turn for this conversation.")
+    );
   }
 
   async publishStarted(
@@ -63,96 +75,172 @@ class FeishuPublisher implements TurnPublisher {
     note?: string
   ): Promise<void> {
     const activeRepository = binding.activeRepository;
+    const networkNote = activeRepository
+      ? buildCodexNetworkAccessStartNote(activeRepository)
+      : undefined;
     const message = activeRepository
       ? [
-          note,
-          `Running worker Codex against "${activeRepository.repositoryId}" (${activeRepository.sandboxMode})${
-            activeRepository.workerSessionId ? ` session=${activeRepository.workerSessionId}` : ""
-          }.`,
-          buildCodexNetworkAccessStartNote(activeRepository)
+          note ? `Context:\n${note}` : undefined,
+          `Repository: "${activeRepository.repositoryId}"`,
+          `Sandbox: ${activeRepository.sandboxMode}`,
+          activeRepository.workerSessionId
+            ? `Worker session: ${activeRepository.workerSessionId}`
+            : undefined,
+          networkNote ? `Network: ${networkNote}` : undefined
         ]
           .filter(Boolean)
           .join("\n")
       : note ?? "Running the handler Codex session.";
 
-    await this.setStatusMessage("Started", message);
+    await this.envelope.postMessage(renderFeishuStatus("Started", message));
   }
 
   async publishProgress(_: InboundTurn, message: string): Promise<void> {
-    await this.setStatusMessage("Working", message);
+    if (await this.replaceWorkingPlaceholder(renderFeishuStatus("Working", message))) {
+      return;
+    }
+
+    await this.envelope.postMessage(renderFeishuStatus("Working", message));
   }
 
   async publishCompleted(_: InboundTurn, message: OutboundMessage): Promise<void> {
-    if (this.statusMessageId && this.envelope.updateMessage) {
-      await this.tryUpdateStatusMessage(this.statusMessageId, renderFeishuStatus("Completed", "Finished this Codex turn."));
+    if (
+      !(await this.replaceWorkingPlaceholder(
+        renderFeishuStatus("Completed", "Finished this Codex turn.")
+      ))
+    ) {
+      await this.envelope.postMessage(renderFeishuStatus("Completed", "Finished this Codex turn."));
     }
 
-    const suffix = message.truncated ? "\n\nReply was truncated for chat delivery." : "";
-    await this.envelope.postMessage(`${message.text}${suffix}`);
+    await this.envelope.postMessage(renderFeishuReply(message.text, message.truncated));
+
+    if (!this.envelope.uploadFile) {
+      return;
+    }
+
+    for (const attachment of message.attachments ?? []) {
+      try {
+        const uploaded = await this.envelope.uploadFile({
+          localPath: attachment.localPath,
+          name: attachment.name,
+          mimeType: attachment.mimeType
+        });
+        await this.envelope.postMessage(renderFeishuFileMessage(uploaded.fileKey));
+      } catch (error) {
+        await this.envelope.postMessage(
+          renderFeishuStatus(
+            "Attachment upload failed",
+            `Could not return "${attachment.name}": ${formatAttachmentFailure(error)}`
+          )
+        );
+      }
+    }
   }
 
   async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
-    await this.setStatusMessage("Interrupted", message);
+    if (await this.replaceWorkingPlaceholder(renderFeishuStatus("Interrupted", message))) {
+      return;
+    }
+
+    await this.envelope.postMessage(renderFeishuStatus("Interrupted", message));
   }
 
   async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
-    if (this.statusMessageId && this.envelope.updateMessage) {
-      await this.tryUpdateStatusMessage(
-        this.statusMessageId,
-        renderFeishuStatus("Failed", "Codex could not complete this turn.")
-      );
+    if (await this.replaceWorkingPlaceholder(renderFeishuError(errorMessage))) {
+      return;
     }
 
     await this.envelope.postMessage(renderFeishuError(errorMessage));
   }
 
-  private async setStatusMessage(title: string, body: string): Promise<void> {
-    const content = renderFeishuStatus(title, body);
+  async refreshWorkingIndicator(): Promise<void> {
+    const placeholder = renderFeishuStatus(
+      "Working",
+      `Still working. Last update: ${formatFeishuWorkingTimestamp(new Date())}`
+    );
 
-    if (this.statusMessageId && this.envelope.updateMessage) {
-      const updated = await this.tryUpdateStatusMessage(this.statusMessageId, content);
-      if (updated) {
-        return;
-      }
+    if (this.workingPlaceholderMessageId && this.envelope.updateMessage) {
+      await this.envelope.updateMessage(this.workingPlaceholderMessageId, placeholder);
+      return;
     }
 
-    const result = await this.envelope.postMessage(content);
-    if (result.messageId) {
-      this.statusMessageId = result.messageId;
+    const result = await this.envelope.postMessage(placeholder);
+    if (result.messageId && this.envelope.updateMessage) {
+      this.workingPlaceholderMessageId = result.messageId;
     }
   }
 
-  private async tryUpdateStatusMessage(messageId: string, content: string): Promise<boolean> {
-    if (!this.envelope.updateMessage) {
+  async hideWorkingIndicator(): Promise<void> {
+    return undefined;
+  }
+
+  private async replaceWorkingPlaceholder(message: FeishuChatMessage): Promise<boolean> {
+    if (!this.workingPlaceholderMessageId || !this.envelope.updateMessage) {
       return false;
     }
 
-    try {
-      await this.envelope.updateMessage(messageId, content);
-      return true;
-    } catch {
-      return false;
-    }
+    await this.envelope.updateMessage(this.workingPlaceholderMessageId, message);
+    this.workingPlaceholderMessageId = undefined;
+    return true;
   }
 }
 
-function renderFeishuStatus(title: string, body: string): string {
+export function renderFeishuNotice(title: string, body: string): FeishuChatMessage {
+  return renderFeishuTextMessage([title, "", body.trim()].filter(Boolean).join("\n"));
+}
+
+export function renderFeishuTextMessage(text: string): FeishuChatMessage {
+  return {
+    msgType: "text",
+    content: JSON.stringify({
+      text
+    })
+  };
+}
+
+function renderFeishuFileMessage(fileKey: string): FeishuChatMessage {
+  return {
+    msgType: "file",
+    content: JSON.stringify({
+      file_key: fileKey
+    })
+  };
+}
+
+function renderFeishuStatus(title: string, body: string): FeishuChatMessage {
   const normalizedBody = body.trim();
-  if (!normalizedBody) {
-    return title;
-  }
+  const text = normalizedBody
+    ? [`[${title}]`, normalizedBody].join("\n")
+    : `[${title}]`;
 
-  return `${title}\n${normalizedBody}`;
+  return renderFeishuTextMessage(text);
 }
 
-function renderFeishuError(errorMessage: string): string {
-  return [
-    "Codex failed",
-    "",
-    trimCodeFencePayload(errorMessage)
-  ].join("\n");
+function renderFeishuReply(body: string, truncated: boolean | undefined): FeishuChatMessage {
+  const normalizedBody = body.trim();
+  const suffix = truncated ? "\n\nReply truncated for Feishu delivery." : "";
+  return renderFeishuTextMessage(`${normalizedBody}${suffix}`.trim());
+}
+
+function renderFeishuError(errorMessage: string): FeishuChatMessage {
+  return renderFeishuTextMessage(
+    ["[Failed]", "Codex could not complete this turn.", "", trimCodeFencePayload(errorMessage)].join("\n")
+  );
 }
 
 function trimCodeFencePayload(value: string): string {
   return value.replace(/```/g, "`\u200b``").trim();
+}
+
+function formatFeishuWorkingTimestamp(value: Date): string {
+  const iso = value.toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
+}
+
+function formatAttachmentFailure(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "unknown upload error";
 }

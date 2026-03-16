@@ -71,6 +71,7 @@ test("CodexRunner prefixes new and resumed worker sessions with --search and wor
     approvalPolicy: "never",
     searchEnabled: true,
     networkAccessEnabled: true,
+    addDirs: [harness.paths.networkDir],
     configOverrides: ['foo="bar"']
   });
 
@@ -106,6 +107,8 @@ test("CodexRunner prefixes new and resumed worker sessions with --search and wor
     'approval_policy="never"',
     "-c",
     "sandbox_workspace_write.network_access=true",
+    "--add-dir",
+    harness.paths.networkDir,
     "worker-session",
     "follow up"
   ]);

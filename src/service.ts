@@ -1,6 +1,13 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import {
+  captureTrackedDocumentFiles,
+  diffTrackedDocumentFiles,
+  formatAttachmentsForPrompt,
+  listAttachmentAddDirs,
+  mergeAttachments
+} from "./attachments.js";
 import type { BridgeConfig, RepositoryTarget } from "./config.js";
 import {
   buildCodexNetworkAccessFailureMessage,
@@ -31,6 +38,9 @@ export interface TurnPublisher {
   publishCompleted(turn: InboundTurn, message: OutboundMessage): Promise<void>;
   publishInterrupted(turn: InboundTurn, message: string): Promise<void>;
   publishFailed(turn: InboundTurn, errorMessage: string): Promise<void>;
+  refreshWorkingIndicator?(turn: InboundTurn): Promise<void>;
+  showWorkingIndicator?(turn: InboundTurn): Promise<void>;
+  hideWorkingIndicator?(turn: InboundTurn): Promise<void>;
 }
 
 export interface ConversationStatus {
@@ -98,26 +108,38 @@ export class CodexBridgeService {
         const storedBinding =
           (await this.sessionStore.get(conversationKey)) ?? createConversationBinding(turn);
         let binding = this.refreshBindingForTurn(turn, storedBinding);
+        binding = mergeBindingAttachments(binding, turn.attachments);
+        const effectiveTurn = buildEffectiveTurn(turn, binding);
 
         if (binding !== storedBinding) {
           await this.sessionStore.upsert(binding);
         }
 
         if (binding.activeRepository) {
-          const outcome = await this.completeWorkerTurn(turn, binding, turn.text, publisher);
+          const outcome = await this.completeWorkerTurn(
+            effectiveTurn,
+            binding,
+            effectiveTurn.text,
+            publisher
+          );
           await this.sessionStore.upsert(outcome.binding);
-          await publisher.publishCompleted(turn, outcome.finalMessage);
+          await publisher.publishCompleted(effectiveTurn, outcome.finalMessage);
           return;
         }
 
         let finalMessage: OutboundMessage | undefined;
 
         for (let step = 0; step < this.config.maxHandlerStepsPerTurn; step += 1) {
-          const handlerRun = await this.runHandlerTurn(turn, binding, publisher);
+          const handlerRun = await this.runHandlerTurn(effectiveTurn, binding, publisher);
           binding = handlerRun.binding;
           await this.sessionStore.upsert(binding);
 
-          const outcome = await this.applyHandlerDecision(turn, binding, handlerRun.decision, publisher);
+          const outcome = await this.applyHandlerDecision(
+            effectiveTurn,
+            binding,
+            handlerRun.decision,
+            publisher
+          );
           binding = outcome.binding;
           await this.sessionStore.upsert(binding);
 
@@ -131,7 +153,7 @@ export class CodexBridgeService {
           throw new Error("Handler exceeded the maximum number of orchestration steps for one turn.");
         }
 
-        await publisher.publishCompleted(turn, finalMessage);
+        await publisher.publishCompleted(effectiveTurn, finalMessage);
       } catch (error) {
         if (error instanceof InterruptedConversationTurnError) {
           await this.sessionStore.upsert(error.binding);
@@ -289,6 +311,7 @@ export class CodexBridgeService {
           sandboxMode: this.config.handlerSandboxMode,
           sessionId: binding.handlerSessionId,
           model: this.config.handlerModel,
+          addDirs: listAttachmentAddDirs(turn.attachments),
           onEvent: (event) => {
             progress.onEvent(event);
           },
@@ -419,7 +442,11 @@ export class CodexBridgeService {
 
         return {
           binding: workerResult.binding,
-          finalMessage: clipMessage(buildWorkerReply(workerResult.output), this.config.maxResponseChars)
+          finalMessage: clipMessage(
+            buildWorkerReply(workerResult.output),
+            this.config.maxResponseChars,
+            workerResult.returnedFiles
+          )
         };
       }
     );
@@ -431,18 +458,19 @@ export class CodexBridgeService {
     workerPrompt: string,
     publisher: TurnPublisher,
     signal: AbortSignal
-  ): Promise<{ binding: ConversationBinding; output: string }> {
+  ): Promise<{ binding: ConversationBinding; output: string; returnedFiles: OutboundMessage["attachments"] }> {
     if (!binding.activeRepository) {
       throw new Error("A worker turn was requested without an active repository binding.");
     }
 
     const worker = binding.activeRepository;
-    const prompt = buildWorkerPrompt(worker, workerPrompt);
+    const prompt = buildWorkerPrompt(worker, turn, workerPrompt);
     const progress = new CodexRunProgressReporter(turn, publisher, {
       actor: "worker",
       repositoryId: worker.repositoryId,
       announceTurnStart: false
     });
+    const documentFilesBefore = await captureTrackedDocumentFiles(turn.attachments);
 
     if (hasCodexNetworkAccess(worker)) {
       await fs.mkdir(worker.codexNetworkAccessWorkspacePath, { recursive: true });
@@ -460,7 +488,7 @@ export class CodexBridgeService {
         approvalPolicy: worker.approvalPolicy,
         searchEnabled: hasCodexNetworkAccess(worker),
         networkAccessEnabled: hasCodexNetworkAccess(worker),
-        addDirs: listWorkerAddDirs(worker),
+        addDirs: mergeAddDirs(listWorkerAddDirs(worker), listAttachmentAddDirs(turn.attachments)),
         configOverrides: worker.codexConfigOverrides,
         onEvent: (event) => {
           progress.onEvent(event);
@@ -484,6 +512,8 @@ export class CodexBridgeService {
       await progress.stop();
     }
 
+    const documentFilesAfter = await captureTrackedDocumentFiles(turn.attachments);
+
     return {
       binding: {
         ...binding,
@@ -494,7 +524,8 @@ export class CodexBridgeService {
         },
         updatedAt: new Date().toISOString()
       },
-      output: result.responseText
+      output: result.responseText,
+      returnedFiles: diffTrackedDocumentFiles(documentFilesBefore, documentFilesAfter)
     };
   }
 
@@ -843,6 +874,7 @@ function resetBinding(
       handlerSessionId: undefined,
       handlerConfig: undefined,
       activeRepository: undefined,
+      attachments: undefined,
       updatedAt: now
     };
   }
@@ -851,6 +883,7 @@ function resetBinding(
     return {
       ...binding,
       activeRepository: undefined,
+      attachments: undefined,
       updatedAt: now
     };
   }
@@ -908,41 +941,62 @@ function buildWorkerReply(output: string): string {
   return output.trim() ? output : "Codex completed the requested work.";
 }
 
-function clipMessage(text: string, maxChars: number): OutboundMessage {
+function clipMessage(
+  text: string,
+  maxChars: number,
+  attachments?: OutboundMessage["attachments"]
+): OutboundMessage {
   if (text.length <= maxChars) {
     return {
       text,
-      truncated: false
+      truncated: false,
+      attachments
     };
   }
 
   return {
     text: `${text.slice(0, maxChars - 16)}\n\n[truncated...]`,
-    truncated: true
+    truncated: true,
+    attachments
   };
 }
 
-function buildWorkerPrompt(binding: RepositoryBinding, workerPrompt: string): string {
-  if (!hasCodexNetworkAccess(binding)) {
-    return workerPrompt;
+function buildWorkerPrompt(
+  binding: RepositoryBinding,
+  turn: InboundTurn,
+  workerPrompt: string
+): string {
+  const lines: string[] = [];
+
+  if (hasCodexNetworkAccess(binding)) {
+    lines.push(
+      "Worker execution context:",
+      `- Primary repository path: ${binding.repositoryPath}`,
+      "- nuntius requested web access for this worker session by launching Codex with `--search`.",
+      binding.sandboxMode === "workspace-write"
+        ? "- nuntius also enabled outbound shell network access for the workspace-write sandbox via `-c sandbox_workspace_write.network_access=true`."
+        : "",
+      `- Use this workspace for cloned or downloaded artifacts that do not belong in the primary repository: ${binding.codexNetworkAccessWorkspacePath}`,
+      "- Network-dependent commands may still fail if the host Codex runtime or OS policy blocks outbound access.",
+      "- If outbound access is unavailable, stop and report the failure clearly instead of claiming you fetched remote data.",
+      ""
+    );
   }
 
-  return [
-    "Worker execution context:",
-    `- Primary repository path: ${binding.repositoryPath}`,
-    "- nuntius requested web access for this worker session by launching Codex with `--search`.",
-    binding.sandboxMode === "workspace-write"
-      ? "- nuntius also enabled outbound shell network access for the workspace-write sandbox via `-c sandbox_workspace_write.network_access=true`."
-      : undefined,
-    `- Use this workspace for cloned or downloaded artifacts that do not belong in the primary repository: ${binding.codexNetworkAccessWorkspacePath}`,
-    "- Network-dependent commands may still fail if the host Codex runtime or OS policy blocks outbound access.",
-    "- If outbound access is unavailable, stop and report the failure clearly instead of claiming you fetched remote data.",
-    "",
-    "User task:",
-    workerPrompt
-  ]
-    .filter((line): line is string => Boolean(line))
-    .join("\n");
+  lines.push("User task:");
+  lines.push(workerPrompt.trim() || "(The user sent attachments with no additional text.)");
+
+  if (turn.attachments.length > 0) {
+    lines.push(
+      "",
+      "Attachments visible to this turn:",
+      ...formatAttachmentsForPrompt(turn.attachments),
+      "",
+      "If you modify an attached .doc or .docx file in place, or write a new .doc/.docx beside it in the same attachment directory, nuntius may send that file back to the user after this turn."
+    );
+  }
+
+  return lines.filter(Boolean).join("\n");
 }
 
 function listWorkerAddDirs(binding: RepositoryBinding): string[] | undefined {
@@ -951,6 +1005,11 @@ function listWorkerAddDirs(binding: RepositoryBinding): string[] | undefined {
   }
 
   return [binding.codexNetworkAccessWorkspacePath];
+}
+
+function mergeAddDirs(...groups: Array<string[] | undefined>): string[] | undefined {
+  const merged = [...new Set(groups.flatMap((group) => group ?? []))];
+  return merged.length > 0 ? merged : undefined;
 }
 
 function arraysEqual(left: string[] | undefined, right: string[] | undefined): boolean {
@@ -962,6 +1021,52 @@ function arraysEqual(left: string[] | undefined, right: string[] | undefined): b
   }
 
   return normalizedLeft.every((value, index) => value === normalizedRight[index]);
+}
+
+function attachmentsEqual(left: ConversationBinding["attachments"], right: ConversationBinding["attachments"]): boolean {
+  const normalizedLeft = left ?? [];
+  const normalizedRight = right ?? [];
+
+  if (normalizedLeft.length !== normalizedRight.length) {
+    return false;
+  }
+
+  return normalizedLeft.every((value, index) =>
+    value.id === normalizedRight[index]?.id &&
+    value.kind === normalizedRight[index]?.kind &&
+    value.name === normalizedRight[index]?.name &&
+    value.mimeType === normalizedRight[index]?.mimeType &&
+    value.url === normalizedRight[index]?.url &&
+    value.localPath === normalizedRight[index]?.localPath
+  );
+}
+
+function mergeBindingAttachments(
+  binding: ConversationBinding,
+  attachments: InboundTurn["attachments"]
+): ConversationBinding {
+  const nextAttachments = mergeAttachments(binding.attachments, attachments);
+  if (attachmentsEqual(binding.attachments, nextAttachments)) {
+    return binding;
+  }
+
+  return {
+    ...binding,
+    attachments: nextAttachments,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function buildEffectiveTurn(turn: InboundTurn, binding: ConversationBinding): InboundTurn {
+  const attachments = mergeAttachments(binding.attachments, turn.attachments);
+  if (attachmentsEqual(turn.attachments, attachments)) {
+    return turn;
+  }
+
+  return {
+    ...turn,
+    attachments
+  };
 }
 
 const PROGRESS_HEARTBEAT_MS = 20_000;
@@ -985,6 +1090,7 @@ class CodexRunProgressReporter {
   private bufferedAgentMessage?: string;
   private sawTurnCompleted = false;
   private lastActivityAt = Date.now();
+  private workingIndicatorVisible = false;
 
   constructor(
     private readonly turn: InboundTurn,
@@ -996,7 +1102,7 @@ class CodexRunProgressReporter {
     this.heartbeatTimer = setInterval(() => {
       const now = Date.now();
       if (now - this.lastActivityAt >= PROGRESS_HEARTBEAT_MS) {
-        this.enqueue(buildHeartbeatMessage(this.context));
+        this.publishHeartbeat();
         this.lastActivityAt = now;
       }
     }, 5_000);
@@ -1004,6 +1110,7 @@ class CodexRunProgressReporter {
 
   onEvent(event: CodexEvent): void {
     this.lastActivityAt = Date.now();
+    this.hideWorkingIndicator();
 
     if (event.type === "turn.completed") {
       this.sawTurnCompleted = true;
@@ -1032,11 +1139,68 @@ class CodexRunProgressReporter {
       this.heartbeatTimer = undefined;
     }
 
+    this.hideWorkingIndicator();
+
     if (!this.sawTurnCompleted) {
       this.flushBufferedAgent();
     }
 
     await this.pending;
+  }
+
+  private publishHeartbeat(): void {
+    if (typeof this.publisher.refreshWorkingIndicator === "function") {
+      this.refreshWorkingIndicator();
+      return;
+    }
+
+    if (typeof this.publisher.showWorkingIndicator === "function") {
+      this.showWorkingIndicator();
+      return;
+    }
+
+    this.enqueue(buildHeartbeatMessage(this.context));
+  }
+
+  private refreshWorkingIndicator(): void {
+    this.workingIndicatorVisible = true;
+    this.pending = this.pending.then(async () => {
+      try {
+        await this.publisher.refreshWorkingIndicator?.(this.turn);
+      } catch {
+        // Typing indicator failures should not abort the turn.
+      }
+    });
+  }
+
+  private showWorkingIndicator(): void {
+    if (this.workingIndicatorVisible) {
+      return;
+    }
+
+    this.workingIndicatorVisible = true;
+    this.pending = this.pending.then(async () => {
+      try {
+        await this.publisher.showWorkingIndicator?.(this.turn);
+      } catch {
+        // Typing indicator failures should not abort the turn.
+      }
+    });
+  }
+
+  private hideWorkingIndicator(): void {
+    if (!this.workingIndicatorVisible) {
+      return;
+    }
+
+    this.workingIndicatorVisible = false;
+    this.pending = this.pending.then(async () => {
+      try {
+        await this.publisher.hideWorkingIndicator?.(this.turn);
+      } catch {
+        // Typing indicator failures should not abort the turn.
+      }
+    });
   }
 
   private flushBufferedAgent(): void {
