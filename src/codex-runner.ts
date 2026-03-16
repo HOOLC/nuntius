@@ -16,6 +16,7 @@ export interface CodexTurnRequest {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
   searchEnabled?: boolean;
+  networkAccessEnabled?: boolean;
   addDirs?: string[];
   configOverrides?: string[];
   onEvent?: (event: CodexEvent) => void;
@@ -156,6 +157,10 @@ function buildConfigOverrides(request: CodexTurnRequest): string[] {
 
   if (request.approvalPolicy) {
     overrides.push(`approval_policy="${request.approvalPolicy}"`);
+  }
+
+  if (request.networkAccessEnabled && request.sandboxMode === "workspace-write") {
+    overrides.push("sandbox_workspace_write.network_access=true");
   }
 
   return overrides;

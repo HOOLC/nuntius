@@ -8,10 +8,15 @@ allow_channels = ["discord:123456789012345678:234567890123456789"]
 
 # Codex network access is enabled by default for worker sessions.
 # nuntius explicitly requests web access by launching worker turns with
-# `codex --search`, and it derives a dedicated artifacts workspace under
+# `codex --search`. For `workspace-write` workers it also enables outbound
+# shell network access with `-c sandbox_workspace_write.network_access=true`.
+# It derives a dedicated artifacts workspace under
 # `/tmp/nuntius-codex-network/<repo-id>` when no path is configured here.
-# Host-level network policy must still allow outbound access or the task will
-# fail at runtime with a clear warning.
+# Host-level network policy must still allow outbound access:
+# - the Codex CLI itself must be able to reach chatgpt.com over HTTPS/WebSocket
+# - worker tools like git/curl/ssh must still have DNS + socket access
+# If either prerequisite is blocked, the task will fail at runtime with a
+# clear warning.
 #
 # Optional: disable Codex network access for this repository.
 # allow_codex_network_access = false
@@ -23,6 +28,7 @@ allow_channels = ["discord:123456789012345678:234567890123456789"]
 # approval_policy = "never"
 #
 # Optional: raw `codex -c key=value` overrides applied to the worker. Use this
-# for other reviewed, per-target Codex settings. Web access does not require a
-# `-c` override; nuntius handles that via `codex --search`.
+# for other reviewed, per-target Codex settings. Web search and workspace-write
+# network access do not require a manual override; nuntius handles that via
+# `codex --search` plus `sandbox_workspace_write.network_access=true`.
 # codex_config_overrides = ['shell_environment_policy.inherit="core"']

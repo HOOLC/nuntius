@@ -232,10 +232,13 @@ Use a configured registry of allowed repositories:
 ]
 ```
 
-Unless a repository explicitly disables it, nuntius launches worker turns with `codex --search`
-and derives a dedicated artifacts workspace when none is configured. If the host Codex runtime
-or OS policy still blocks outbound access, the worker should fail explicitly instead of silently
-acting as if the web request succeeded.
+Unless a repository explicitly disables it, nuntius launches worker turns with `codex --search`.
+For `workspace-write` workers it also sets `-c sandbox_workspace_write.network_access=true`, then
+derives a dedicated artifacts workspace when none is configured. If the host Codex runtime or OS
+policy still blocks outbound access, the worker should fail explicitly instead of silently acting
+as if the web request succeeded. End-to-end access still requires the host environment to let the
+Codex CLI reach `chatgpt.com` and to let worker tools resolve/connect to remote hosts such as
+`github.com`.
 
 Rules:
 

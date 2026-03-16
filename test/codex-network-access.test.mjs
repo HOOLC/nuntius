@@ -5,6 +5,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { loadRepositoryRegistry } from "../dist/config.js";
+import {
+  buildCodexNetworkAccessFailureMessage,
+  buildCodexNetworkAccessStartNote
+} from "../dist/codex-network-access.js";
 import { CodexRunner } from "../dist/codex-runner.js";
 import { CodexBridgeService } from "../dist/service.js";
 import { FileSessionStore } from "../dist/session-store.js";
@@ -28,7 +32,20 @@ test("repository targets default to Codex network access with a derived workspac
   );
 });
 
-test("CodexRunner prefixes new and resumed worker sessions with --search when network access is requested", async (t) => {
+test("network access start notes describe the remaining host prerequisites", () => {
+  const note = buildCodexNetworkAccessStartNote({
+    allowCodexNetworkAccess: true,
+    codexNetworkAccessWorkspacePath: "/tmp/nuntius-codex-network/repo",
+    sandboxMode: "workspace-write"
+  });
+
+  assert.match(note, /codex --search/);
+  assert.match(note, /sandbox_workspace_write\.network_access=true/);
+  assert.match(note, /chatgpt\.com/);
+  assert.match(note, /resolve\/connect to external hosts/);
+});
+
+test("CodexRunner prefixes new and resumed worker sessions with --search and workspace-write network access when requested", async (t) => {
   const harness = createRunnerHarness();
   t.after(() => harness.cleanup());
 
@@ -40,6 +57,7 @@ test("CodexRunner prefixes new and resumed worker sessions with --search when ne
     sandboxMode: "workspace-write",
     approvalPolicy: "never",
     searchEnabled: true,
+    networkAccessEnabled: true,
     addDirs: [harness.paths.networkDir],
     configOverrides: ['foo="bar"']
   });
@@ -52,6 +70,7 @@ test("CodexRunner prefixes new and resumed worker sessions with --search when ne
     sessionId: "worker-session",
     approvalPolicy: "never",
     searchEnabled: true,
+    networkAccessEnabled: true,
     configOverrides: ['foo="bar"']
   });
 
@@ -67,6 +86,8 @@ test("CodexRunner prefixes new and resumed worker sessions with --search when ne
     'foo="bar"',
     "-c",
     'approval_policy="never"',
+    "-c",
+    "sandbox_workspace_write.network_access=true",
     "--add-dir",
     harness.paths.networkDir,
     "-s",
@@ -83,6 +104,8 @@ test("CodexRunner prefixes new and resumed worker sessions with --search when ne
     'foo="bar"',
     "-c",
     'approval_policy="never"',
+    "-c",
+    "sandbox_workspace_write.network_access=true",
     "worker-session",
     "follow up"
   ]);
@@ -205,11 +228,31 @@ test("worker failures with requested network access surface an explicit host-lev
     service.runWorkerTurn(buildTurn(), binding, "Fetch docs from the web.", createNoopPublisher()),
     (error) => {
       assert.match(error.message, /requested for this worker session via `codex --search`/);
+      assert.match(error.message, /sandbox_workspace_write\.network_access=true/);
       assert.match(error.message, /nuntius cannot bypass those limits/);
+      assert.match(error.message, /chatgpt\.com/);
       assert.match(error.message, /Operation not permitted/);
       return true;
     }
   );
+});
+
+test("network access failures call out DNS resolution blockers explicitly", () => {
+  const errorMessage = buildCodexNetworkAccessFailureMessage(
+    {
+      allowCodexNetworkAccess: true,
+      codexNetworkAccessWorkspacePath: "/tmp/nuntius-codex-network/repo"
+    },
+    [
+      "Codex exited with code 128.",
+      "ssh: Could not resolve hostname github.com: Temporary failure in name resolution",
+      "fatal: Could not read from remote repository."
+    ].join("\n")
+  );
+
+  assert.match(errorMessage, /DNS resolution failure/);
+  assert.match(errorMessage, /git, ssh, and curl/);
+  assert.match(errorMessage, /Temporary failure in name resolution/);
 });
 
 function createRunnerHarness() {

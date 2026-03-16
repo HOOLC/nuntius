@@ -309,6 +309,7 @@ export class CodexBridgeService {
         model: worker.model,
         approvalPolicy: worker.approvalPolicy,
         searchEnabled: hasCodexNetworkAccess(worker),
+        networkAccessEnabled: hasCodexNetworkAccess(worker),
         addDirs: listWorkerAddDirs(worker),
         configOverrides: worker.codexConfigOverrides,
         onEvent: (event) => {
@@ -533,13 +534,18 @@ function buildWorkerPrompt(binding: RepositoryBinding, workerPrompt: string): st
     "Worker execution context:",
     `- Primary repository path: ${binding.repositoryPath}`,
     "- nuntius requested web access for this worker session by launching Codex with `--search`.",
+    binding.sandboxMode === "workspace-write"
+      ? "- nuntius also enabled outbound shell network access for the workspace-write sandbox via `-c sandbox_workspace_write.network_access=true`."
+      : undefined,
     `- Use this workspace for cloned or downloaded artifacts that do not belong in the primary repository: ${binding.codexNetworkAccessWorkspacePath}`,
     "- Network-dependent commands may still fail if the host Codex runtime or OS policy blocks outbound access.",
     "- If outbound access is unavailable, stop and report the failure clearly instead of claiming you fetched remote data.",
     "",
     "User task:",
     workerPrompt
-  ].join("\n");
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
 }
 
 function listWorkerAddDirs(binding: RepositoryBinding): string[] | undefined {
