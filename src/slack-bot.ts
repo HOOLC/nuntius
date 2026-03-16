@@ -13,7 +13,7 @@ import { createBridgeRuntime } from "./bridge-runtime.js";
 import type { BridgeCommand } from "./interaction-router.js";
 import { parseBridgeCommand } from "./interaction-router.js";
 import { loadSlackBotConfig, type SlackBotConfig } from "./slack-config.js";
-import type { Attachment } from "./domain.js";
+import type { Attachment, ProcessingStatus } from "./domain.js";
 
 const SIGNATURE_MAX_AGE_SECONDS = 60 * 5;
 const EVENT_DEDUP_TTL_MS = 10 * 60_000;
@@ -470,6 +470,7 @@ export class SlackBot {
         text: (event.text ?? "").trim(),
         attachments: mapSlackAttachments(event.files),
         receivedAt: slackTimestampToIso(event.ts),
+        sourceMessageTs: event.ts,
         messageMode: "conversation"
       })
     );
@@ -510,6 +511,7 @@ export class SlackBot {
         text: prompt,
         attachments,
         receivedAt: slackTimestampToIso(event.ts),
+        sourceMessageTs: event.ts,
         messageMode: "conversation"
       })
     );
@@ -549,6 +551,7 @@ export class SlackBot {
         text: prompt,
         attachments,
         receivedAt: slackTimestampToIso(event.ts),
+        sourceMessageTs: event.ts,
         messageMode: "conversation"
       })
     );
@@ -620,8 +623,16 @@ export class SlackBot {
     attachments?: Attachment[];
     receivedAt?: string;
     responseUrl?: string;
+    sourceMessageTs?: string;
     messageMode: "conversation" | "ephemeral";
   }): SlackEnvelope {
+    const syncStatusReaction = input.sourceMessageTs
+      ? createSlackStatusReactionSyncer(this.slackApi, {
+          channelId: input.target.channelId,
+          messageTs: input.sourceMessageTs
+        })
+      : undefined;
+
     return {
       workspaceId: input.target.workspaceId,
       channelId: input.target.channelId,
@@ -651,7 +662,8 @@ export class SlackBot {
         ? async (message) => {
             await this.replyToResponseUrl(input.responseUrl, message);
           }
-        : undefined
+        : undefined,
+      syncStatusReaction
     };
   }
 
@@ -789,6 +801,30 @@ class SlackWebApiClient {
       channel: input.channel,
       ts: input.ts,
       text: input.text
+    });
+  }
+
+  async addReaction(input: {
+    channel: string;
+    timestamp: string;
+    name: string;
+  }): Promise<void> {
+    await this.callApi<SlackApiMethodResponse>("reactions.add", {
+      channel: input.channel,
+      timestamp: input.timestamp,
+      name: input.name
+    });
+  }
+
+  async removeReaction(input: {
+    channel: string;
+    timestamp: string;
+    name: string;
+  }): Promise<void> {
+    await this.callApi<SlackApiMethodResponse>("reactions.remove", {
+      channel: input.channel,
+      timestamp: input.timestamp,
+      name: input.name
     });
   }
 
@@ -980,6 +1016,57 @@ function slackTimestampToIso(value: string): string {
   }
 
   return new Date(seconds * 1000).toISOString();
+}
+
+function createSlackStatusReactionSyncer(
+  slackApi: SlackWebApiClient,
+  target: {
+    channelId: string;
+    messageTs: string;
+  }
+): (status: ProcessingStatus) => Promise<void> {
+  let currentStatus: ProcessingStatus | undefined;
+
+  return async (status) => {
+    if (currentStatus === status) {
+      return;
+    }
+
+    const previousStatus = currentStatus;
+    if (previousStatus) {
+      try {
+        await slackApi.removeReaction({
+          channel: target.channelId,
+          timestamp: target.messageTs,
+          name: slackProcessingReactionName(previousStatus)
+        });
+      } catch {
+        // Best-effort cleanup of the previous processing marker.
+      }
+    }
+
+    await slackApi.addReaction({
+      channel: target.channelId,
+      timestamp: target.messageTs,
+      name: slackProcessingReactionName(status)
+    });
+    currentStatus = status;
+  };
+}
+
+function slackProcessingReactionName(status: ProcessingStatus): string {
+  switch (status) {
+    case "queued":
+      return "hourglass_flowing_sand";
+    case "working":
+      return "hammer_and_wrench";
+    case "finished":
+      return "white_check_mark";
+    case "failed":
+      return "x";
+    case "interrupted":
+      return "warning";
+  }
 }
 
 function joinSlackApiUrl(baseUrl: string, method: string): string {

@@ -43,6 +43,7 @@ Recommended permissions:
 - `im:message.group_at_msg:readonly`
 - `im:message:send`
 - `im:message:update`
+- `im:message.reactions:write_only`
 - `im:resource`
 
 `im:resource` is needed if you want the bot to download inbound file attachments from Feishu and upload modified files back into the conversation. The upload API also documents the newer `im:resource:upload` scope, but `im:resource` covers the end-to-end attachment flow used by nuntius.
@@ -108,6 +109,7 @@ npm run start
 - If `feishu.admin_open_ids` is set, only those users can run `/codexadmin`.
 - Root group messages only trigger the bot when they start with `/codex` or mention the bot.
 - Persistent work in a group is moved into a Feishu thread automatically; later replies in that thread reuse the same bound worker session.
+- nuntius adds status reactions to inbound Feishu messages when the bot can address the source message directly.
 - File attachments received in a conversation remain available to later turns in that conversation unless you clear the binding with `/codex reset binding` or `/codex reset all`.
 - `/codexadmin reloadconfig` reloads the bridge config and repository registry in-process.
 - `/codexadmin hotreload` runs `npm run build`, probes the rebuilt Feishu worker, then swaps the active worker when the bot is running under the bundled supervisor started by `npm run feishu:start` or `npm run start`.

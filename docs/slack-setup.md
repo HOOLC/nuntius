@@ -49,6 +49,7 @@ Recommended bot token scopes:
 - `channels:history`
 - `groups:history`
 - `im:history`
+- `reactions:write`
 
 Recommended event subscriptions:
 
@@ -115,7 +116,8 @@ npm run start
 - Slash-command ask/bind in a normal channel creates a dedicated Slack thread starter message first.
 - Channel mentions start Codex inside a thread rooted on the user's message.
 - Once a thread is bound to a repo, later replies in that thread go straight to the bound worker session until `/codex bind` or `/codex reset` changes the state.
-- Worker progress stays in one updateable Slack status message where possible instead of spamming the thread.
+- nuntius adds status reactions to inbound Slack messages when a concrete source message exists; slash commands keep their normal ephemeral acknowledgements.
+- Worker progress is posted as plain thread replies, while reactions on the inbound message show queued/working/finished state.
 - `reloadconfig` reloads the bridge config and repository registry in-process.
 - `restart` only exits the current process. Use systemd, Docker restart policy, or another supervisor to bring it back up.
 - Listener host/port changes still require restarting the process.

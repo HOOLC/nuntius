@@ -19,7 +19,7 @@ import { createBridgeRuntime } from "./bridge-runtime.js";
 import type { BridgeCommand } from "./interaction-router.js";
 import { parseBridgeCommand } from "./interaction-router.js";
 import { loadFeishuBotConfig, type FeishuBotConfig } from "./feishu-config.js";
-import type { Attachment, InboundTurn } from "./domain.js";
+import type { Attachment, InboundTurn, ProcessingStatus } from "./domain.js";
 
 const EVENT_DEDUP_TTL_MS = 10 * 60_000;
 const WORKER_BOOT_TIMEOUT_MS = 30_000;
@@ -286,6 +286,7 @@ export class FeishuBot {
         userId,
         text: trimmedText,
         attachments,
+        sourceMessageId: message.message_id,
         receivedAt
       });
       return;
@@ -298,6 +299,7 @@ export class FeishuBot {
         text: trimmedText,
         attachments,
         mentionedBot: parsedMessage.mentionedBot,
+        sourceMessageId: message.message_id,
         receivedAt
       });
       return;
@@ -309,6 +311,7 @@ export class FeishuBot {
       text: trimmedText,
       attachments,
       mentionedBot: parsedMessage.mentionedBot,
+      sourceMessageId: message.message_id,
       receivedAt
     });
   }
@@ -318,6 +321,7 @@ export class FeishuBot {
     userId: string;
     text: string;
     attachments: Attachment[];
+    sourceMessageId: string;
     receivedAt: string;
   }): Promise<void> {
     if (!input.text && input.attachments.length === 0) {
@@ -331,6 +335,7 @@ export class FeishuBot {
         userId: input.userId,
         text: input.text,
         attachments: input.attachments,
+        sourceMessageId: input.sourceMessageId,
         receivedAt: input.receivedAt
       })
     );
@@ -342,6 +347,7 @@ export class FeishuBot {
     text: string;
     attachments: Attachment[];
     mentionedBot: boolean;
+    sourceMessageId: string;
     receivedAt: string;
   }): Promise<void> {
     const looksLikeCodexCommand = input.text.startsWith("/codex");
@@ -367,6 +373,7 @@ export class FeishuBot {
         userId: input.userId,
         text: input.text,
         attachments: input.attachments,
+        sourceMessageId: input.sourceMessageId,
         receivedAt: input.receivedAt
       })
     );
@@ -378,6 +385,7 @@ export class FeishuBot {
     text: string;
     attachments: Attachment[];
     mentionedBot: boolean;
+    sourceMessageId: string;
     receivedAt: string;
   }): Promise<void> {
     const looksLikeCodexCommand = input.text.startsWith("/codex");
@@ -395,6 +403,7 @@ export class FeishuBot {
             userId: input.userId,
             text: input.text,
             attachments: input.attachments,
+            sourceMessageId: input.sourceMessageId,
             receivedAt: input.receivedAt
           })
         );
@@ -408,6 +417,7 @@ export class FeishuBot {
           userId: input.userId,
           text: input.text,
           attachments: input.attachments,
+          sourceMessageId: input.sourceMessageId,
           receivedAt: input.receivedAt
         })
       );
@@ -429,6 +439,7 @@ export class FeishuBot {
         userId: input.userId,
         text: input.text,
         attachments: input.attachments,
+        sourceMessageId: input.sourceMessageId,
         receivedAt: input.receivedAt
       })
     );
@@ -656,8 +667,13 @@ export class FeishuBot {
     userId: string;
     text: string;
     attachments?: Attachment[];
+    sourceMessageId?: string;
     receivedAt?: string;
   }): FeishuEnvelope {
+    const syncStatusReaction = input.sourceMessageId
+      ? createFeishuStatusReactionSyncer(this.feishuApi, input.sourceMessageId)
+      : undefined;
+
     return {
       workspaceId: input.target.workspaceId,
       channelId: input.target.channelId,
@@ -680,7 +696,8 @@ export class FeishuBot {
         return {
           fileKey
         };
-      }
+      },
+      syncStatusReaction
     };
   }
 
@@ -866,6 +883,44 @@ class FeishuApiClient {
     );
   }
 
+  async addMessageReaction(input: {
+    messageId: string;
+    emojiType: string;
+  }): Promise<{ reactionId?: string }> {
+    const response = await this.callApi<{
+      code: number;
+      msg: string;
+      error?: {
+        log_id?: string;
+      };
+      data?: {
+        reaction_id?: string;
+      };
+    }>(
+      "POST",
+      `/im/v1/messages/${encodeURIComponent(input.messageId)}/reactions`,
+      {
+        reaction_type: {
+          emoji_type: input.emojiType
+        }
+      }
+    );
+
+    return {
+      reactionId: response.data?.reaction_id
+    };
+  }
+
+  async deleteMessageReaction(input: {
+    messageId: string;
+    reactionId: string;
+  }): Promise<void> {
+    await this.callApi<{ code: number; msg: string; error?: { log_id?: string } }>(
+      "DELETE",
+      `/im/v1/messages/${encodeURIComponent(input.messageId)}/reactions/${encodeURIComponent(input.reactionId)}`
+    );
+  }
+
   async downloadMessageResource(input: {
     messageId: string;
     fileKey: string;
@@ -939,7 +994,7 @@ class FeishuApiClient {
   }
 
   private async callApi<T extends { code: number; msg: string; error?: { log_id?: string } }>(
-    method: "GET" | "POST" | "PUT",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     resourcePath: string,
     body?: Record<string, unknown>
   ): Promise<T> {
@@ -1011,6 +1066,53 @@ class FeishuApiClient {
     };
 
     return parsed.tenant_access_token;
+  }
+}
+
+function createFeishuStatusReactionSyncer(
+  feishuApi: FeishuApiClient,
+  messageId: string
+): (status: ProcessingStatus) => Promise<void> {
+  let currentStatus: ProcessingStatus | undefined;
+  let currentReactionId: string | undefined;
+
+  return async (status) => {
+    if (currentStatus === status) {
+      return;
+    }
+
+    if (currentReactionId) {
+      try {
+        await feishuApi.deleteMessageReaction({
+          messageId,
+          reactionId: currentReactionId
+        });
+      } catch {
+        // Best-effort cleanup of the previous processing marker.
+      }
+    }
+
+    const created = await feishuApi.addMessageReaction({
+      messageId,
+      emojiType: feishuProcessingEmojiType(status)
+    });
+    currentReactionId = created.reactionId;
+    currentStatus = status;
+  };
+}
+
+function feishuProcessingEmojiType(status: ProcessingStatus): string {
+  switch (status) {
+    case "queued":
+      return "OneSecond";
+    case "working":
+      return "HAMMER";
+    case "finished":
+      return "DONE";
+    case "failed":
+      return "CrossMark";
+    case "interrupted":
+      return "Alarm";
   }
 }
 

@@ -40,6 +40,7 @@ test("slash bind in a channel bootstraps a Slack thread and confirms ephemerally
   assert.equal(harness.records[2].body.thread_ts, "1000");
   assert.match(harness.records[2].body.text, /Bound this conversation to "nuntius"/);
   assert.equal(harness.records[3].body.text, "Bound in this thread.");
+  assert.deepEqual(harness.reactionRecords, []);
 });
 
 test("thread replies after bind go straight to the worker session and reuse it", async (t) => {
@@ -88,17 +89,24 @@ test("thread replies after bind go straight to the worker session and reuse it",
 
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["chat.postMessage", "chat.update", "chat.update", "chat.postMessage"]
+    ["chat.postMessage", "chat.postMessage"]
   );
   assert.equal(harness.records[0].body.thread_ts, "1000");
-  assert.match(harness.records[0].body.text, /^\*Started\*/);
-  assert.equal(harness.records[1].body.ts, "1002");
-  assert.match(harness.records[1].body.text, /^\*Working\*/);
-  assert.match(harness.records[1].body.text, /README\.md/);
-  assert.equal(harness.records[2].body.ts, "1002");
-  assert.match(harness.records[2].body.text, /^\*Completed\*/);
-  assert.equal(harness.records[3].body.thread_ts, "1000");
-  assert.equal(harness.records[3].body.text, "Worker summary output.");
+  assert.equal(harness.records[0].body.text, "Codex in `nuntius` updated `README.md`.");
+  assert.equal(harness.records[1].body.thread_ts, "1000");
+  assert.equal(harness.records[1].body.text, "Worker summary output.");
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.kind),
+    ["reactions.add", "reactions.remove", "reactions.add"]
+  );
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.body.name),
+    ["hammer_and_wrench", "hammer_and_wrench", "white_check_mark"]
+  );
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.body.timestamp),
+    ["1710000001.000200", "1710000001.000200", "1710000001.000200"]
+  );
 
   harness.resetRecords();
 
@@ -124,13 +132,24 @@ test("thread replies after bind go straight to the worker session and reuse it",
 
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["chat.postMessage", "chat.update", "chat.update", "chat.postMessage"]
+    ["chat.postMessage", "chat.postMessage"]
   );
   assert.equal(harness.records[0].body.thread_ts, "1000");
-  assert.match(harness.records[0].body.text, /^\*Started\*/);
-  assert.match(harness.records[0].body.text, /session=worker-session/);
-  assert.equal(harness.records[3].body.thread_ts, "1000");
-  assert.equal(harness.records[3].body.text, "Worker follow-up output.");
+  assert.equal(harness.records[0].body.text, "Codex in `nuntius` updated `README.md`.");
+  assert.equal(harness.records[1].body.thread_ts, "1000");
+  assert.equal(harness.records[1].body.text, "Worker follow-up output.");
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.kind),
+    ["reactions.add", "reactions.remove", "reactions.add"]
+  );
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.body.name),
+    ["hammer_and_wrench", "hammer_and_wrench", "white_check_mark"]
+  );
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.body.timestamp),
+    ["1710000002.000300", "1710000002.000300", "1710000002.000300"]
+  );
 
   const invocations = readInvocationLog(harness.paths.invocationLogPath);
   assert.deepEqual(invocations, ["worker:new", "resume:worker-session"]);
@@ -177,6 +196,7 @@ function createHarness() {
 
   const previousFetch = globalThis.fetch;
   const records = [];
+  const reactionRecords = [];
   let nextTimestamp = 1000;
 
   globalThis.fetch = async (url, init = {}) => {
@@ -186,7 +206,11 @@ function createHarness() {
       url: String(url),
       body
     };
-    records.push(record);
+    if (record.kind.startsWith("reactions.")) {
+      reactionRecords.push(record);
+    } else {
+      records.push(record);
+    }
 
     switch (record.kind) {
       case "auth.test":
@@ -204,6 +228,11 @@ function createHarness() {
         return jsonResponse({
           ok: true
         });
+      case "reactions.add":
+      case "reactions.remove":
+        return jsonResponse({
+          ok: true
+        });
       case "response_url":
         return new Response("", { status: 200 });
       default:
@@ -217,8 +246,10 @@ function createHarness() {
       invocationLogPath
     },
     records,
+    reactionRecords,
     resetRecords() {
       records.splice(0, records.length);
+      reactionRecords.splice(0, reactionRecords.length);
     },
     cleanup() {
       globalThis.fetch = previousFetch;
@@ -269,6 +300,12 @@ function classifyFetch(url) {
   }
   if (value.endsWith("/chat.update")) {
     return "chat.update";
+  }
+  if (value.endsWith("/reactions.add")) {
+    return "reactions.add";
+  }
+  if (value.endsWith("/reactions.remove")) {
+    return "reactions.remove";
   }
   if (value === "https://hooks.slack.test/response") {
     return "response_url";

@@ -2,6 +2,7 @@ export type ChatPlatform = "slack" | "discord" | "feishu";
 export type ConversationScope = "dm" | "channel" | "thread";
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+export type ProcessingStatus = "queued" | "working" | "finished" | "failed" | "interrupted";
 
 export interface Attachment {
   id: string;

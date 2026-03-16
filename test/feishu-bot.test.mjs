@@ -24,21 +24,30 @@ test("duplicate long connection events are ignored", async (t) => {
   });
   bot.handleIncomingLongConnectionEvent(event);
 
-  await waitFor(() => harness.records.length === 2);
+  await waitFor(() => harness.records.length === 1);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.reply"]
+    ["message.reply"]
   );
   assert.equal(harness.records[0].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[0]), "[Completed]\nFinished this Codex turn.");
-  assert.equal(harness.records[1].body.msg_type, "text");
-  assert.match(readTextContent(harness.records[1]), /\/codex/);
+  assert.match(readTextContent(harness.records[0]), /\/codex/);
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.kind),
+    ["reaction.create"]
+  );
+  assert.equal(harness.reactionRecords[0].path, "/im/v1/messages/om-dm-1/reactions");
+  assert.deepEqual(harness.reactionRecords[0].body, {
+    reaction_type: {
+      emoji_type: "DONE"
+    }
+  });
 
   harness.resetRecords();
   bot.handleIncomingLongConnectionEvent(event);
   await new Promise((resolve) => setTimeout(resolve, 25));
 
   assert.deepEqual(harness.records, []);
+  assert.deepEqual(harness.reactionRecords, []);
 });
 
 test("admin hotreload rebuilds and requests a supervisor reload", async (t) => {
@@ -78,6 +87,7 @@ test("admin hotreload rebuilds and requests a supervisor reload", async (t) => {
   assert.match(readTextContent(harness.records[0]), /Rebuilding the Feishu bridge now/);
   assert.match(readTextContent(harness.records[1]), /Hot reload requested/);
   assert.deepEqual(workerMessages, [{ type: "request_hot_reload" }]);
+  assert.deepEqual(harness.reactionRecords, []);
 });
 
 test("group bind bootstraps a Feishu thread and thread replies reuse the worker session", async (t) => {
@@ -104,10 +114,10 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.length === 3);
+  await waitFor(() => harness.records.length === 2);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.reply", "message.reply"]
+    ["message.reply", "message.reply"]
   );
   assert.equal(harness.records[0].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[0].body.msg_type, "text");
@@ -116,11 +126,17 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
   assert.equal(harness.records[1].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[1].body.msg_type, "text");
   assert.equal(harness.records[1].body.reply_in_thread, true);
-  assert.equal(readTextContent(harness.records[1]), "[Completed]\nFinished this Codex turn.");
-  assert.equal(harness.records[2].path, "/im/v1/messages/om-root-1/reply");
-  assert.equal(harness.records[2].body.msg_type, "text");
-  assert.equal(harness.records[2].body.reply_in_thread, true);
-  assert.match(readTextContent(harness.records[2]), /Bound this conversation to "nuntius"/);
+  assert.match(readTextContent(harness.records[1]), /Bound this conversation to "nuntius"/);
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.kind),
+    ["reaction.create"]
+  );
+  assert.equal(harness.reactionRecords[0].path, "/im/v1/messages/om-root-1/reactions");
+  assert.deepEqual(harness.reactionRecords[0].body, {
+    reaction_type: {
+      emoji_type: "DONE"
+    }
+  });
 
   harness.resetRecords();
 
@@ -136,25 +152,35 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.length === 4);
+  await waitFor(() => harness.records.length === 2);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.reply", "message.reply", "message.reply"]
+    ["message.reply", "message.reply"]
   );
   assert.equal(harness.records[0].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[0].body.msg_type, "text");
   assert.equal(harness.records[0].body.reply_in_thread, true);
-  assert.match(readTextContent(harness.records[0]), /^\[Started\]/);
+  assert.equal(readTextContent(harness.records[0]), "Codex in `nuntius` updated `README.md`.");
   assert.equal(harness.records[1].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[1].body.msg_type, "text");
-  assert.match(readTextContent(harness.records[1]), /^\[Working\]/);
-  assert.match(readTextContent(harness.records[1]), /README\.md/);
-  assert.equal(harness.records[2].path, "/im/v1/messages/om-root-1/reply");
-  assert.equal(harness.records[2].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[2]), "[Completed]\nFinished this Codex turn.");
-  assert.equal(harness.records[3].path, "/im/v1/messages/om-root-1/reply");
-  assert.equal(harness.records[3].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[3]), "Worker summary output.");
+  assert.equal(readTextContent(harness.records[1]), "Worker summary output.");
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.kind),
+    ["reaction.create", "reaction.delete", "reaction.create"]
+  );
+  assert.equal(harness.reactionRecords[0].path, "/im/v1/messages/om-thread-user-1/reactions");
+  assert.deepEqual(harness.reactionRecords[0].body, {
+    reaction_type: {
+      emoji_type: "HAMMER"
+    }
+  });
+  assert.match(harness.reactionRecords[1].path, /\/im\/v1\/messages\/om-thread-user-1\/reactions\/reaction-\d+$/);
+  assert.equal(harness.reactionRecords[2].path, "/im/v1/messages/om-thread-user-1/reactions");
+  assert.deepEqual(harness.reactionRecords[2].body, {
+    reaction_type: {
+      emoji_type: "DONE"
+    }
+  });
 
   harness.resetRecords();
 
@@ -170,15 +196,32 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.length === 4);
+  await waitFor(() => harness.records.length === 2);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.reply", "message.reply", "message.reply"]
+    ["message.reply", "message.reply"]
   );
   assert.equal(harness.records[0].body.msg_type, "text");
-  assert.match(readTextContent(harness.records[0]), /worker-session/);
-  assert.equal(harness.records[3].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[3]), "Worker follow-up output.");
+  assert.equal(readTextContent(harness.records[0]), "Codex in `nuntius` updated `README.md`.");
+  assert.equal(harness.records[1].body.msg_type, "text");
+  assert.equal(readTextContent(harness.records[1]), "Worker follow-up output.");
+  assert.deepEqual(
+    harness.reactionRecords.map((record) => record.kind),
+    ["reaction.create", "reaction.delete", "reaction.create"]
+  );
+  assert.equal(harness.reactionRecords[0].path, "/im/v1/messages/om-thread-user-2/reactions");
+  assert.deepEqual(harness.reactionRecords[0].body, {
+    reaction_type: {
+      emoji_type: "HAMMER"
+    }
+  });
+  assert.match(harness.reactionRecords[1].path, /\/im\/v1\/messages\/om-thread-user-2\/reactions\/reaction-\d+$/);
+  assert.equal(harness.reactionRecords[2].path, "/im/v1/messages/om-thread-user-2/reactions");
+  assert.deepEqual(harness.reactionRecords[2].body, {
+    reaction_type: {
+      emoji_type: "DONE"
+    }
+  });
 
   const invocations = readInvocationLog(harness.paths.invocationLogPath);
   assert.deepEqual(invocations, ["worker:new", "resume:worker-session"]);
@@ -302,6 +345,8 @@ function createHarness() {
 
   const previousFetch = globalThis.fetch;
   const records = [];
+  const reactionRecords = [];
+  let nextReactionId = 1;
 
   globalThis.fetch = async (url, init = {}) => {
     const parsedUrl = new URL(String(url));
@@ -315,7 +360,11 @@ function createHarness() {
       query: parsedUrl.searchParams.toString(),
       body
     };
-    records.push(record);
+    if (record.kind.startsWith("reaction.")) {
+      reactionRecords.push(record);
+    } else {
+      records.push(record);
+    }
 
     if (record.kind === "auth") {
       return jsonResponse({
@@ -361,11 +410,9 @@ function createHarness() {
       const messageId =
         rendered === "Codex thread"
           ? "om-thread-starter-1"
-          : rendered.startsWith("[Started]")
-            ? "om-status-1"
-            : rendered.includes("Bound this conversation")
-              ? "om-bind-confirmation"
-              : "om-message-1";
+          : rendered.includes("Bound this conversation")
+            ? "om-bind-confirmation"
+            : "om-message-1";
 
       return jsonResponse({
         code: 0,
@@ -397,6 +444,24 @@ function createHarness() {
       });
     }
 
+    if (record.kind === "reaction.create") {
+      return jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: {
+          reaction_id: `reaction-${nextReactionId++}`
+        }
+      });
+    }
+
+    if (record.kind === "reaction.delete") {
+      return jsonResponse({
+        code: 0,
+        msg: "ok",
+        data: {}
+      });
+    }
+
     throw new Error(`Unexpected fetch in Feishu test harness: ${method} ${url}`);
   };
 
@@ -406,8 +471,10 @@ function createHarness() {
       invocationLogPath
     },
     records,
+    reactionRecords,
     resetRecords() {
       records.splice(0, records.length);
+      reactionRecords.splice(0, reactionRecords.length);
     },
     cleanup() {
       globalThis.fetch = previousFetch;
@@ -512,6 +579,14 @@ function classifyFeishuFetch(method, pathName) {
 
   if (method === "PUT" && /\/im\/v1\/messages\/[^/]+$/.test(pathName)) {
     return "message.update";
+  }
+
+  if (method === "POST" && /\/im\/v1\/messages\/[^/]+\/reactions$/.test(pathName)) {
+    return "reaction.create";
+  }
+
+  if (method === "DELETE" && /\/im\/v1\/messages\/[^/]+\/reactions\/[^/]+$/.test(pathName)) {
+    return "reaction.delete";
   }
 
   return "unexpected";

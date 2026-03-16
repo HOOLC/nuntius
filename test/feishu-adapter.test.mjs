@@ -57,7 +57,7 @@ test("Feishu refreshes a single working placeholder and replaces it with real pr
   );
   assert.deepEqual(
     postedMessages.slice(1).map((message) => JSON.parse(message.content).text),
-    ["[Completed]\nFinished this Codex turn.", "Finished."]
+    ["Finished."]
   );
   assert.equal(updatedMessages.length, 2);
   assert.equal(updatedMessages[0].messageId, "om-working-1");
@@ -68,6 +68,6 @@ test("Feishu refreshes a single working placeholder and replaces it with real pr
   assert.equal(updatedMessages[1].messageId, "om-working-1");
   assert.equal(
     JSON.parse(updatedMessages[1].message.content).text,
-    "[Working]\nCodex updated `README.md`."
+    "Codex updated `README.md`."
   );
 });

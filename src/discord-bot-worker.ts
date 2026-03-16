@@ -9,6 +9,7 @@ import {
   Events,
   GatewayIntentBits,
   Message,
+  type MessageReaction,
   Partials,
   type ChatInputCommandInteraction,
   type NewsChannel,
@@ -26,7 +27,7 @@ import {
   type DiscordInteractionDeliveryState,
   type DiscordSendableChannel
 } from "./discord-delivery.js";
-import type { Attachment } from "./domain.js";
+import type { Attachment, ProcessingStatus } from "./domain.js";
 import {
   isSupervisorToWorkerMessage,
   type DiscordWorkerMode,
@@ -439,7 +440,8 @@ class DiscordBotWorker {
       receivedAt: message.createdAt.toISOString(),
       deferReply: async () => undefined,
       startTyping: () => startDiscordTyping(asSendableChannel(message.channel)),
-      followUp: (content) => sendDiscordText(asSendableChannel(message.channel), content)
+      followUp: (content) => sendDiscordText(asSendableChannel(message.channel), content),
+      syncStatusReaction: createDiscordStatusReactionSyncer(message)
     });
   }
 
@@ -480,7 +482,8 @@ class DiscordBotWorker {
       receivedAt: message.createdAt.toISOString(),
       deferReply: async () => undefined,
       startTyping: () => startDiscordTyping(thread),
-      followUp: (content) => sendDiscordText(thread, content)
+      followUp: (content) => sendDiscordText(thread, content),
+      syncStatusReaction: createDiscordStatusReactionSyncer(message)
     });
   }
 
@@ -528,7 +531,8 @@ class DiscordBotWorker {
       receivedAt: message.createdAt.toISOString(),
       deferReply: async () => undefined,
       startTyping: () => startDiscordTyping(thread),
-      followUp: (content) => sendDiscordText(thread, content)
+      followUp: (content) => sendDiscordText(thread, content),
+      syncStatusReaction: createDiscordStatusReactionSyncer(message)
     });
   }
 
@@ -762,6 +766,46 @@ async function startDiscordTyping(
       clearInterval(timer);
     }
   };
+}
+
+function createDiscordStatusReactionSyncer(
+  message: Message
+): (status: ProcessingStatus) => Promise<void> {
+  let currentStatus: ProcessingStatus | undefined;
+  let currentReaction: MessageReaction | undefined;
+
+  return async (status) => {
+    if (currentStatus === status) {
+      return;
+    }
+
+    const previousReaction = currentReaction;
+    if (previousReaction) {
+      try {
+        await previousReaction.users.remove();
+      } catch {
+        // Best-effort cleanup of the previous processing marker.
+      }
+    }
+
+    currentReaction = await message.react(discordProcessingEmoji(status));
+    currentStatus = status;
+  };
+}
+
+function discordProcessingEmoji(status: ProcessingStatus): string {
+  switch (status) {
+    case "queued":
+      return "⏳";
+    case "working":
+      return "🛠️";
+    case "finished":
+      return "✅";
+    case "failed":
+      return "❌";
+    case "interrupted":
+      return "⚠️";
+  }
 }
 
 function mapMessageAttachments(message: Message): Attachment[] {

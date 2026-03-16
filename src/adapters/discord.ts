@@ -2,11 +2,9 @@ import type {
   Attachment,
   ConversationBinding,
   InboundTurn,
-  OutboundMessage
+  OutboundMessage,
+  ProcessingStatus
 } from "../domain.js";
-import {
-  buildCodexNetworkAccessStartNote
-} from "../codex-network-access.js";
 import type { InteractionRouter } from "../interaction-router.js";
 import type { TurnPublisher } from "../service.js";
 
@@ -24,6 +22,7 @@ export interface DiscordEnvelope {
   deferReply: () => Promise<void>;
   startTyping?: () => Promise<{ stop(): Promise<void> }>;
   followUp: (message: string) => Promise<void>;
+  syncStatusReaction?: (status: ProcessingStatus) => Promise<void>;
 }
 
 export class DiscordAdapter {
@@ -53,10 +52,12 @@ class DiscordPublisher implements TurnPublisher {
   private typingLease?: {
     stop(): Promise<void>;
   };
+  private processingStatus?: ProcessingStatus;
 
   constructor(private readonly envelope: DiscordEnvelope) {}
 
   async publishQueued(): Promise<void> {
+    await this.syncProcessingStatus("queued");
     await this.envelope.followUp(
       renderDiscordStatus("Queued", "Waiting for the active Codex turn in this conversation.")
     );
@@ -64,45 +65,35 @@ class DiscordPublisher implements TurnPublisher {
 
   async publishStarted(
     _: InboundTurn,
-    binding: ConversationBinding,
-    note?: string
+    _binding: ConversationBinding,
+    _note?: string
   ): Promise<void> {
-    const activeRepository = binding.activeRepository;
-    const details = activeRepository
-      ? [
-          note,
-          `Repository: \`${activeRepository.repositoryId}\``,
-          `Sandbox: \`${activeRepository.sandboxMode}\``,
-          buildCodexNetworkAccessStartNote(activeRepository),
-          activeRepository.workerSessionId
-            ? `Worker session: \`${activeRepository.workerSessionId}\``
-            : undefined
-        ]
-      : [note ?? "Running the handler Codex session."];
-
-    await this.envelope.followUp(
-      renderDiscordStatus("Started", details.filter(Boolean).join("\n"))
-    );
+    await this.syncProcessingStatus("working");
   }
 
   async publishProgress(_: InboundTurn, message: string): Promise<void> {
-    await this.envelope.followUp(renderDiscordStatus("Working", message));
+    await this.syncProcessingStatus("working");
+    await this.envelope.followUp(renderDiscordReply(message));
   }
 
   async publishCompleted(_: InboundTurn, message: OutboundMessage): Promise<void> {
+    await this.syncProcessingStatus("finished");
     const suffix = message.truncated ? "\n\n_Reply truncated for Discord delivery._" : "";
     await this.envelope.followUp(renderDiscordReply(`${message.text}${suffix}`));
   }
 
   async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
+    await this.syncProcessingStatus("interrupted");
     await this.envelope.followUp(renderDiscordStatus("Interrupted", message));
   }
 
   async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
+    await this.syncProcessingStatus("failed");
     await this.envelope.followUp(renderDiscordError(errorMessage));
   }
 
   async showWorkingIndicator(): Promise<void> {
+    await this.syncProcessingStatus("working");
     if (this.typingLease || !this.envelope.startTyping) {
       return;
     }
@@ -126,6 +117,19 @@ class DiscordPublisher implements TurnPublisher {
       await lease.stop();
     } catch {
       // Typing failures should not abort the Discord turn.
+    }
+  }
+
+  private async syncProcessingStatus(status: ProcessingStatus): Promise<void> {
+    if (!this.envelope.syncStatusReaction || this.processingStatus === status) {
+      return;
+    }
+
+    try {
+      await this.envelope.syncStatusReaction(status);
+      this.processingStatus = status;
+    } catch {
+      // Reaction failures should not abort the Discord turn.
     }
   }
 }

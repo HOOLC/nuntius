@@ -2,9 +2,9 @@ import type {
   Attachment,
   ConversationBinding,
   InboundTurn,
-  OutboundMessage
+  OutboundMessage,
+  ProcessingStatus
 } from "../domain.js";
-import { buildCodexNetworkAccessStartNote } from "../codex-network-access.js";
 import type { InteractionRouter } from "../interaction-router.js";
 import type { TurnPublisher } from "../service.js";
 
@@ -32,6 +32,7 @@ export interface FeishuEnvelope {
     name: string;
     mimeType?: string;
   }) => Promise<{ fileKey: string }>;
+  syncStatusReaction?: (status: ProcessingStatus) => Promise<void>;
 }
 
 export class FeishuAdapter {
@@ -60,10 +61,12 @@ export class FeishuAdapter {
 
 class FeishuPublisher implements TurnPublisher {
   private workingPlaceholderMessageId?: string;
+  private processingStatus?: ProcessingStatus;
 
   constructor(private readonly envelope: FeishuEnvelope) {}
 
   async publishQueued(): Promise<void> {
+    await this.syncProcessingStatus("queued");
     await this.envelope.postMessage(
       renderFeishuStatus("Queued", "Queued behind the active Codex turn for this conversation.")
     );
@@ -71,48 +74,28 @@ class FeishuPublisher implements TurnPublisher {
 
   async publishStarted(
     _: InboundTurn,
-    binding: ConversationBinding,
-    note?: string
+    _binding: ConversationBinding,
+    _note?: string
   ): Promise<void> {
-    const activeRepository = binding.activeRepository;
-    const networkNote = activeRepository
-      ? buildCodexNetworkAccessStartNote(activeRepository)
-      : undefined;
-    const message = activeRepository
-      ? [
-          note ? `Context:\n${note}` : undefined,
-          `Repository: "${activeRepository.repositoryId}"`,
-          `Sandbox: ${activeRepository.sandboxMode}`,
-          activeRepository.workerSessionId
-            ? `Worker session: ${activeRepository.workerSessionId}`
-            : undefined,
-          networkNote ? `Network: ${networkNote}` : undefined
-        ]
-          .filter(Boolean)
-          .join("\n")
-      : note ?? "Running the handler Codex session.";
-
-    await this.envelope.postMessage(renderFeishuStatus("Started", message));
+    await this.syncProcessingStatus("working");
   }
 
   async publishProgress(_: InboundTurn, message: string): Promise<void> {
-    if (await this.replaceWorkingPlaceholder(renderFeishuStatus("Working", message))) {
+    await this.syncProcessingStatus("working");
+    const progressMessage = renderFeishuTextMessage(message);
+    if (await this.replaceWorkingPlaceholder(progressMessage)) {
       return;
     }
 
-    await this.envelope.postMessage(renderFeishuStatus("Working", message));
+    await this.envelope.postMessage(progressMessage);
   }
 
   async publishCompleted(_: InboundTurn, message: OutboundMessage): Promise<void> {
-    if (
-      !(await this.replaceWorkingPlaceholder(
-        renderFeishuStatus("Completed", "Finished this Codex turn.")
-      ))
-    ) {
-      await this.envelope.postMessage(renderFeishuStatus("Completed", "Finished this Codex turn."));
+    await this.syncProcessingStatus("finished");
+    const replyMessage = renderFeishuReply(message.text, message.truncated);
+    if (!(await this.replaceWorkingPlaceholder(replyMessage))) {
+      await this.envelope.postMessage(replyMessage);
     }
-
-    await this.envelope.postMessage(renderFeishuReply(message.text, message.truncated));
 
     if (!this.envelope.uploadFile) {
       return;
@@ -138,6 +121,7 @@ class FeishuPublisher implements TurnPublisher {
   }
 
   async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
+    await this.syncProcessingStatus("interrupted");
     if (await this.replaceWorkingPlaceholder(renderFeishuStatus("Interrupted", message))) {
       return;
     }
@@ -146,6 +130,7 @@ class FeishuPublisher implements TurnPublisher {
   }
 
   async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
+    await this.syncProcessingStatus("failed");
     if (await this.replaceWorkingPlaceholder(renderFeishuError(errorMessage))) {
       return;
     }
@@ -154,6 +139,7 @@ class FeishuPublisher implements TurnPublisher {
   }
 
   async refreshWorkingIndicator(): Promise<void> {
+    await this.syncProcessingStatus("working");
     const placeholder = renderFeishuStatus(
       "Working",
       `Still working. Last update: ${formatFeishuWorkingTimestamp(new Date())}`
@@ -172,6 +158,19 @@ class FeishuPublisher implements TurnPublisher {
 
   async hideWorkingIndicator(): Promise<void> {
     return undefined;
+  }
+
+  private async syncProcessingStatus(status: ProcessingStatus): Promise<void> {
+    if (!this.envelope.syncStatusReaction || this.processingStatus === status) {
+      return;
+    }
+
+    try {
+      await this.envelope.syncStatusReaction(status);
+      this.processingStatus = status;
+    } catch {
+      // Reaction failures should not abort the Feishu turn.
+    }
   }
 
   private async replaceWorkingPlaceholder(message: FeishuChatMessage): Promise<boolean> {
