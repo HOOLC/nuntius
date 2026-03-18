@@ -1,6 +1,8 @@
+import { localize } from "../conversation-language.js";
 import type {
   Attachment,
   ConversationBinding,
+  ConversationLanguage,
   InboundTurn,
   OutboundMessage,
   ProcessingStatus
@@ -56,50 +58,101 @@ class SlackPublisher implements TurnPublisher {
 
   constructor(private readonly envelope: SlackEnvelope) {}
 
-  async publishQueued(): Promise<void> {
+  async publishQueued(_: InboundTurn, language: ConversationLanguage): Promise<void> {
     await this.syncProcessingStatus("queued");
     if (this.envelope.postEphemeral) {
-      await this.envelope.postEphemeral("Queued behind the active Codex turn for this thread.");
+      await this.envelope.postEphemeral(
+        localize(language, {
+          en: "Queued behind the active Codex turn for this thread.",
+          zh: "当前线程已有进行中的 Codex turn，本条消息已进入队列。"
+        })
+      );
       return;
     }
 
-    await this.setStatusMessage("Queued", "Queued behind the active Codex turn for this thread.");
+    await this.setStatusMessage(
+      localize(language, {
+        en: "Queued",
+        zh: "已排队"
+      }),
+      localize(language, {
+        en: "Queued behind the active Codex turn for this thread.",
+        zh: "当前线程已有进行中的 Codex turn，本条消息已进入队列。"
+      })
+    );
   }
 
   async publishStarted(
-    _: InboundTurn,
+    _turn: InboundTurn,
     _binding: ConversationBinding,
-    _note?: string
+    _note: string | undefined,
+    _language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
   }
 
-  async publishProgress(_: InboundTurn, message: string): Promise<void> {
+  async publishProgress(
+    _: InboundTurn,
+    message: string,
+    _language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("working");
     await this.setMessage(message);
   }
 
-  async publishCompleted(_: InboundTurn, message: OutboundMessage): Promise<void> {
+  async publishCompleted(
+    _: InboundTurn,
+    message: OutboundMessage,
+    language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("finished");
-    const suffix = message.truncated ? "\n\nReply was truncated for chat delivery." : "";
+    const suffix = message.truncated
+      ? localize(language, {
+          en: "\n\nReply was truncated for chat delivery.",
+          zh: "\n\n回复因聊天平台限制已被截断。"
+        })
+      : "";
     await this.envelope.postMessage(`${message.text}${suffix}`);
   }
 
-  async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
+  async publishInterrupted(
+    _: InboundTurn,
+    message: string,
+    language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("interrupted");
-    await this.setStatusMessage("Interrupted", message);
+    await this.setStatusMessage(
+      localize(language, {
+        en: "Interrupted",
+        zh: "已中断"
+      }),
+      message
+    );
   }
 
-  async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
+  async publishFailed(
+    _: InboundTurn,
+    errorMessage: string,
+    language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("failed");
     if (this.statusMessageTs && this.envelope.updateMessage) {
       await this.envelope.updateMessage(
         this.statusMessageTs,
-        renderSlackStatus("Failed", "Codex could not complete this turn.")
+        renderSlackStatus(
+          localize(language, {
+            en: "Failed",
+            zh: "失败"
+          }),
+          localize(language, {
+            en: "Codex could not complete this turn.",
+            zh: "Codex 未能完成这次 turn。"
+          })
+        )
       );
     }
 
-    await this.envelope.postMessage(renderSlackError(errorMessage));
+    await this.envelope.postMessage(renderSlackError(errorMessage, language));
   }
 
   private async syncProcessingStatus(status: ProcessingStatus): Promise<void> {
@@ -147,9 +200,12 @@ function renderSlackStatus(title: string, body: string): string {
   return `*${title}*\n${quotedBody}`;
 }
 
-function renderSlackError(errorMessage: string): string {
+function renderSlackError(errorMessage: string, language: ConversationLanguage): string {
   return [
-    "*Codex failed*",
+    localize(language, {
+      en: "*Codex failed*",
+      zh: "*Codex 失败*"
+    }),
     "```",
     trimCodeFencePayload(errorMessage),
     "```"

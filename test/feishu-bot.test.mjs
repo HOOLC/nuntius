@@ -1,10 +1,71 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { FeishuBot } from "../dist/feishu-bot.js";
+
+test("probe worker reports readiness and exits cleanly", async (t) => {
+  const harness = createHarness();
+  t.after(() => harness.cleanup());
+
+  const child = spawn(process.execPath, ["dist/feishu-bot.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NUNTIUS_CONFIG_PATH: harness.paths.configPath,
+      NUNTIUS_FEISHU_WORKER_MODE: "probe"
+    },
+    stdio: ["ignore", "pipe", "pipe", "ipc"]
+  });
+
+  let stdout = "";
+  let stderr = "";
+
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk;
+  });
+
+  const result = await new Promise((resolve, reject) => {
+    let ready = false;
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(
+        new Error(
+          `Timed out waiting for probe worker exit.\nstdout:\n${stdout || "<empty>"}\nstderr:\n${stderr || "<empty>"}`
+        )
+      );
+    }, 5_000);
+
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+
+    child.on("message", (message) => {
+      if (message?.type === "probe_ready") {
+        ready = true;
+      }
+    });
+
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, ready, signal, stderr, stdout });
+    });
+  });
+
+  assert.equal(result.ready, true);
+  assert.equal(result.code, 0);
+  assert.equal(result.signal, null);
+  assert.equal(result.stderr, "");
+});
 
 test("duplicate long connection events are ignored", async (t) => {
   const harness = createHarness();
@@ -468,6 +529,7 @@ function createHarness() {
   return {
     paths: {
       root,
+      configPath,
       invocationLogPath
     },
     records,

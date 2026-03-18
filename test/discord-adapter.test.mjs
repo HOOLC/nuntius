@@ -79,3 +79,38 @@ test("Discord heartbeats use typing instead of a progress message", async () => 
   ]);
   assert.deepEqual(reactions, ["queued", "working", "finished"]);
 });
+
+test("Discord adapter localizes queued and truncated system messages in Chinese", async () => {
+  const messages = [];
+
+  const adapter = new DiscordAdapter({
+    async handleTurn(turn, publisher) {
+      await publisher.publishQueued(turn, "zh");
+      await publisher.publishCompleted(
+        turn,
+        {
+          text: "已完成。",
+          truncated: true
+        },
+        "zh"
+      );
+    }
+  });
+
+  await adapter.handleTurn({
+    workspaceId: "discord:workspace",
+    channelId: "thread-1",
+    scope: "thread",
+    userId: "user-1",
+    text: "你好",
+    deferReply: async () => undefined,
+    followUp: async (message) => {
+      messages.push(message);
+    }
+  });
+
+  assert.deepEqual(messages, [
+    "**已排队**\n> 当前会话已有进行中的 Codex turn，正在等待。",
+    "已完成。\n\n_回复因 Discord 投递限制已被截断。_"
+  ]);
+});

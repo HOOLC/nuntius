@@ -84,7 +84,7 @@ export function loadConfig(): BridgeConfig {
     handlerSandboxMode: parseSandboxMode(
       readString(bridgeRecord, "handler_sandbox_mode") ??
         process.env.NUNTIUS_HANDLER_SANDBOX_MODE ??
-        "read-only"
+        "danger-full-access"
     ),
     handlerModel: readString(bridgeRecord, "handler_model") ?? readOptionalEnvString(process.env.NUNTIUS_HANDLER_MODEL),
     maxHandlerStepsPerTurn:
@@ -155,7 +155,7 @@ function parseRepositoryTargets(raw: string | undefined): RepositoryTarget[] {
       {
         id: "default",
         path: process.cwd(),
-        sandboxMode: "workspace-write"
+        sandboxMode: "danger-full-access"
       }
     ];
   }

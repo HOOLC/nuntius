@@ -8,6 +8,11 @@ import {
   listAttachmentAddDirs,
   mergeAttachments
 } from "./attachments.js";
+import {
+  detectConversationLanguage,
+  localize,
+  resolveConversationLanguage
+} from "./conversation-language.js";
 import type { BridgeConfig, RepositoryTarget } from "./config.js";
 import {
   buildCodexNetworkAccessFailureMessage,
@@ -16,10 +21,12 @@ import {
 import type {
   CodexEvent,
   ConversationBinding,
+  ConversationLanguage,
   HandlerSessionBinding,
   InboundTurn,
   OutboundMessage,
-  RepositoryBinding
+  RepositoryBinding,
+  SandboxMode
 } from "./domain.js";
 import { conversationKeyToId, toConversationKey } from "./domain.js";
 import { CodexTurnInterruptedError, type CodexRunner } from "./codex-runner.js";
@@ -32,15 +39,20 @@ import type { SerialTurnQueue } from "./serial-turn-queue.js";
 import type { SessionStore } from "./session-store.js";
 
 export interface TurnPublisher {
-  publishQueued(turn: InboundTurn): Promise<void>;
-  publishStarted(turn: InboundTurn, binding: ConversationBinding, note?: string): Promise<void>;
-  publishProgress(turn: InboundTurn, message: string): Promise<void>;
-  publishCompleted(turn: InboundTurn, message: OutboundMessage): Promise<void>;
-  publishInterrupted(turn: InboundTurn, message: string): Promise<void>;
-  publishFailed(turn: InboundTurn, errorMessage: string): Promise<void>;
-  refreshWorkingIndicator?(turn: InboundTurn): Promise<void>;
-  showWorkingIndicator?(turn: InboundTurn): Promise<void>;
-  hideWorkingIndicator?(turn: InboundTurn): Promise<void>;
+  publishQueued(turn: InboundTurn, language: ConversationLanguage): Promise<void>;
+  publishStarted(
+    turn: InboundTurn,
+    binding: ConversationBinding,
+    note: string | undefined,
+    language: ConversationLanguage
+  ): Promise<void>;
+  publishProgress(turn: InboundTurn, message: string, language: ConversationLanguage): Promise<void>;
+  publishCompleted(turn: InboundTurn, message: OutboundMessage, language: ConversationLanguage): Promise<void>;
+  publishInterrupted(turn: InboundTurn, message: string, language: ConversationLanguage): Promise<void>;
+  publishFailed(turn: InboundTurn, errorMessage: string, language: ConversationLanguage): Promise<void>;
+  refreshWorkingIndicator?(turn: InboundTurn, language: ConversationLanguage): Promise<void>;
+  showWorkingIndicator?(turn: InboundTurn, language: ConversationLanguage): Promise<void>;
+  hideWorkingIndicator?(turn: InboundTurn, language: ConversationLanguage): Promise<void>;
 }
 
 export interface ConversationStatus {
@@ -55,6 +67,9 @@ export interface SessionReconciliationResult {
   clearedWorkerSessions: number;
   droppedRepositoryBindings: number;
 }
+
+const EFFECTIVE_SESSION_SANDBOX_MODE: SandboxMode = "danger-full-access";
+const HANDLER_SESSION_CONFIG_VERSION = 1;
 
 interface HandlerRunResult {
   binding: ConversationBinding;
@@ -98,18 +113,27 @@ export class CodexBridgeService {
   async handleTurn(turn: InboundTurn, publisher: TurnPublisher): Promise<void> {
     const conversationKey = toConversationKey(turn);
     const conversationId = conversationKeyToId(conversationKey);
+    const existingBinding = await this.sessionStore.get(conversationKey);
+    const initialLanguage = resolveConversationLanguage({
+      binding: existingBinding,
+      text: turn.text
+    });
 
     if (this.queue.isBusy(conversationId)) {
-      await publisher.publishQueued(turn);
+      await publisher.publishQueued(turn, initialLanguage);
     }
 
     await this.queue.run(conversationId, async () => {
+      let bindingForError = existingBinding ?? createConversationBinding(turn);
       try {
         const storedBinding =
           (await this.sessionStore.get(conversationKey)) ?? createConversationBinding(turn);
-        let binding = this.refreshBindingForTurn(turn, storedBinding);
+        let binding = this.ensureConversationLanguage(storedBinding, turn);
         binding = mergeBindingAttachments(binding, turn.attachments);
+        binding = this.refreshBindingForTurn(turn, binding);
+        bindingForError = binding;
         const effectiveTurn = buildEffectiveTurn(turn, binding);
+        const language = binding.language ?? initialLanguage;
 
         if (binding !== storedBinding) {
           await this.sessionStore.upsert(binding);
@@ -123,7 +147,7 @@ export class CodexBridgeService {
             publisher
           );
           await this.sessionStore.upsert(outcome.binding);
-          await publisher.publishCompleted(effectiveTurn, outcome.finalMessage);
+          await publisher.publishCompleted(effectiveTurn, outcome.finalMessage, language);
           return;
         }
 
@@ -150,20 +174,34 @@ export class CodexBridgeService {
         }
 
         if (!finalMessage) {
-          throw new Error("Handler exceeded the maximum number of orchestration steps for one turn.");
+          throw new Error(
+            localize(language, {
+              en: "Handler exceeded the maximum number of orchestration steps for one turn.",
+              zh: "Handler 在单次 turn 中超过了允许的最大编排步数。"
+            })
+          );
         }
 
-        await publisher.publishCompleted(effectiveTurn, finalMessage);
+        await publisher.publishCompleted(effectiveTurn, finalMessage, language);
       } catch (error) {
+        const language = resolveConversationLanguage({
+          binding: bindingForError,
+          text: turn.text
+        });
         if (error instanceof InterruptedConversationTurnError) {
           await this.sessionStore.upsert(error.binding);
-          await publisher.publishInterrupted(turn, error.message);
+          await publisher.publishInterrupted(turn, error.message, language);
           return;
         }
 
         const errorMessage =
-          error instanceof Error ? error.message : "The bridge hit an unknown failure.";
-        await publisher.publishFailed(turn, errorMessage);
+          error instanceof Error
+            ? error.message
+            : localize(language, {
+                en: "The bridge hit an unknown failure.",
+                zh: "bridge 遇到了未知故障。"
+              });
+        await publisher.publishFailed(turn, errorMessage, language);
       }
     });
   }
@@ -241,7 +279,11 @@ export class CodexBridgeService {
     const conversationId = conversationKeyToId(conversationKey);
 
     return this.queue.run(conversationId, async () => {
-      const existing = (await this.sessionStore.get(conversationKey)) ?? createConversationBinding(turn);
+      const existing =
+        this.ensureConversationLanguage(
+          (await this.sessionStore.get(conversationKey)) ?? createConversationBinding(turn),
+          turn
+        );
       const refreshed = this.refreshHandlerSessionBinding(existing);
       const repository = this.resolveRepository(turn, repositoryId);
       const binding = bindRepository(refreshed, repository);
@@ -289,16 +331,19 @@ export class CodexBridgeService {
     binding: ConversationBinding,
     publisher: TurnPublisher
   ): Promise<HandlerRunResult> {
+    const handlerConfig = buildHandlerSessionConfig(this.config);
     const prompt = buildHandlerUserPrompt({
       turn,
       state: binding,
       availableRepositories: this.listAccessibleRepositories(turn),
-      requireExplicitRepositorySelection: this.config.requireExplicitRepositorySelection
+      requireExplicitRepositorySelection: this.config.requireExplicitRepositorySelection,
+      conversationLanguage: binding.language ?? resolveConversationLanguage({ text: turn.text })
     });
 
     const progress = new CodexRunProgressReporter(turn, publisher, {
       actor: "handler",
-      announceTurnStart: true
+      announceTurnStart: true,
+      language: binding.language ?? resolveConversationLanguage({ text: turn.text })
     });
 
     return this.runWithActiveTurn(turn, { actor: "handler" }, async (signal) => {
@@ -307,10 +352,10 @@ export class CodexBridgeService {
         progress.start();
         result = await this.runner.runTurn({
           prompt,
-          repositoryPath: this.config.handlerWorkspacePath,
-          sandboxMode: this.config.handlerSandboxMode,
+          repositoryPath: handlerConfig.workspacePath,
+          sandboxMode: handlerConfig.sandboxMode,
           sessionId: binding.handlerSessionId,
-          model: this.config.handlerModel,
+          model: handlerConfig.model,
           addDirs: listAttachmentAddDirs(turn.attachments),
           onEvent: (event) => {
             progress.onEvent(event);
@@ -334,7 +379,7 @@ export class CodexBridgeService {
         binding: {
           ...binding,
           handlerSessionId: result.sessionId ?? binding.handlerSessionId,
-          handlerConfig: buildHandlerSessionConfig(this.config),
+          handlerConfig,
           updatedAt: new Date().toISOString()
         },
         decision: parseHandlerDecision(result.responseText)
@@ -348,11 +393,13 @@ export class CodexBridgeService {
     decision: HandlerDecision,
     publisher: TurnPublisher
   ): Promise<{ binding: ConversationBinding; finalMessage?: OutboundMessage }> {
+    const language = binding.language ?? resolveConversationLanguage({ text: turn.text });
+
     switch (decision.action) {
       case "reply":
         return {
           binding: touchBinding(binding),
-          finalMessage: clipMessage(decision.message, this.config.maxResponseChars)
+          finalMessage: clipMessage(decision.message, this.config.maxResponseChars, undefined, language)
         };
       case "bind_repo": {
         const repository = this.resolveRepository(turn, decision.repositoryId);
@@ -362,8 +409,14 @@ export class CodexBridgeService {
           return {
             binding: nextBinding,
             finalMessage: clipMessage(
-              decision.message ?? `This thread is now bound to repository "${repository.id}".`,
-              this.config.maxResponseChars
+              decision.message ??
+                localize(language, {
+                  en: `This thread is now bound to repository "${repository.id}".`,
+                  zh: `当前线程已绑定到仓库 "${repository.id}"。`
+                }),
+              this.config.maxResponseChars,
+              undefined,
+              language
             )
           };
         }
@@ -381,8 +434,10 @@ export class CodexBridgeService {
           return {
             binding: touchBinding(binding),
             finalMessage: clipMessage(
-              this.buildMissingRepositoryMessage(turn),
-              this.config.maxResponseChars
+              this.buildMissingRepositoryMessage(turn, language),
+              this.config.maxResponseChars,
+              undefined,
+              language
             )
           };
         }
@@ -401,14 +456,24 @@ export class CodexBridgeService {
         return {
           binding: resetBinding(binding, decision.scope),
           finalMessage: clipMessage(
-            decision.message ?? buildResetMessage(decision.scope),
-            this.config.maxResponseChars
+            decision.message ?? buildResetMessage(decision.scope, language),
+            this.config.maxResponseChars,
+            undefined,
+            language
           )
         };
       default:
         return {
           binding,
-          finalMessage: clipMessage("Unsupported handler decision.", this.config.maxResponseChars)
+          finalMessage: clipMessage(
+            localize(language, {
+              en: "Unsupported handler decision.",
+              zh: "不支持的 handler 决策。"
+            }),
+            this.config.maxResponseChars,
+            undefined,
+            language
+          )
         };
     }
   }
@@ -430,7 +495,12 @@ export class CodexBridgeService {
         repositoryId: currentBinding.activeRepository?.repositoryId
       },
       async (signal) => {
-        await publisher.publishStarted(turn, currentBinding, note);
+        await publisher.publishStarted(
+          turn,
+          currentBinding,
+          note,
+          currentBinding.language ?? resolveConversationLanguage({ text: turn.text })
+        );
 
         const workerResult = await this.runWorkerTurn(
           turn,
@@ -443,9 +513,13 @@ export class CodexBridgeService {
         return {
           binding: workerResult.binding,
           finalMessage: clipMessage(
-            buildWorkerReply(workerResult.output),
+            buildWorkerReply(
+              workerResult.output,
+              currentBinding.language ?? resolveConversationLanguage({ text: turn.text })
+            ),
             this.config.maxResponseChars,
-            workerResult.returnedFiles
+            workerResult.returnedFiles,
+            currentBinding.language ?? resolveConversationLanguage({ text: turn.text })
           )
         };
       }
@@ -468,7 +542,8 @@ export class CodexBridgeService {
     const progress = new CodexRunProgressReporter(turn, publisher, {
       actor: "worker",
       repositoryId: worker.repositoryId,
-      announceTurnStart: false
+      announceTurnStart: false,
+      language: binding.language ?? resolveConversationLanguage({ text: turn.text })
     });
     const documentFilesBefore = await captureTrackedDocumentFiles(turn.attachments);
 
@@ -504,7 +579,13 @@ export class CodexBridgeService {
       }
 
       if (error instanceof Error) {
-        throw new Error(buildCodexNetworkAccessFailureMessage(worker, error.message));
+        throw new Error(
+          buildCodexNetworkAccessFailureMessage(
+            worker,
+            error.message,
+            binding.language ?? resolveConversationLanguage({ text: turn.text })
+          )
+        );
       }
 
       throw error;
@@ -530,14 +611,25 @@ export class CodexBridgeService {
   }
 
   private resolveRepository(turn: InboundTurn, repositoryId: string): RepositoryTarget {
+    const language = resolveConversationLanguage({ text: turn.text });
     const repository = this.config.repositoryTargets.find((candidate) => candidate.id === repositoryId);
 
     if (!repository) {
-      throw new Error(`Unknown repository target: ${repositoryId}.`);
+      throw new Error(
+        localize(language, {
+          en: `Unknown repository target: ${repositoryId}.`,
+          zh: `未知的仓库目标：${repositoryId}。`
+        })
+      );
     }
 
     if (!this.hasRepositoryAccess(turn, repository)) {
-      throw new Error("This user or channel is not allowed to access the selected repository target.");
+      throw new Error(
+        localize(language, {
+          en: "This user or channel is not allowed to access the selected repository target.",
+          zh: "当前用户或频道无权访问所选仓库目标。"
+        })
+      );
     }
 
     return repository;
@@ -563,18 +655,31 @@ export class CodexBridgeService {
     return true;
   }
 
-  private buildMissingRepositoryMessage(turn: InboundTurn): string {
+  private buildMissingRepositoryMessage(
+    turn: InboundTurn,
+    language: ConversationLanguage
+  ): string {
     const available = this.listAccessibleRepositories(turn).map((repository) => repository.id);
 
     if (available.length === 0) {
-      return "No repositories are available to this user in this channel.";
+      return localize(language, {
+        en: "No repositories are available to this user in this channel.",
+        zh: "当前用户在此频道中没有可用仓库。"
+      });
     }
 
-    return [
-      "No repository is bound to this conversation.",
-      "Use `/codex bind <repo-id>` to bind one first, or mention the repository explicitly so the handler can bind it.",
-      `Available repositories: ${available.join(", ")}.`
-    ].join(" ");
+    return localize(language, {
+      en: [
+        "No repository is bound to this conversation.",
+        "Use `/codex bind <repo-id>` to bind one first, or mention the repository explicitly so the handler can bind it.",
+        `Available repositories: ${available.join(", ")}.`
+      ].join(" "),
+      zh: [
+        "当前会话尚未绑定仓库。",
+        "请先使用 `/codex bind <repo-id>` 进行绑定，或者在消息里明确提到仓库，让 handler 帮你绑定。",
+        `可用仓库：${available.join(", ")}。`
+      ].join(" ")
+    });
   }
 
   private refreshActiveRepositoryBinding(
@@ -600,6 +705,26 @@ export class CodexBridgeService {
     }
 
     return this.refreshActiveRepositoryBinding(turn, binding);
+  }
+
+  private ensureConversationLanguage(
+    binding: ConversationBinding,
+    turn: InboundTurn
+  ): ConversationBinding {
+    const language = resolveConversationLanguage({
+      binding,
+      text: turn.text
+    });
+
+    if (binding.language === language) {
+      return binding;
+    }
+
+    return {
+      ...binding,
+      language,
+      updatedAt: new Date().toISOString()
+    };
   }
 
   private refreshHandlerSessionBinding(binding: ConversationBinding): ConversationBinding {
@@ -735,6 +860,7 @@ function createConversationBinding(turn: InboundTurn): ConversationBinding {
   const now = new Date().toISOString();
   return {
     key: toConversationKey(turn),
+    language: detectConversationLanguage(turn.text),
     createdByUserId: turn.userId,
     createdAt: now,
     updatedAt: now
@@ -781,10 +907,12 @@ function deriveRepositoryBinding(
   repository: RepositoryTarget,
   updatedAt: string
 ): RepositoryBinding {
+  const sandboxMode = getEffectiveSessionSandboxMode(repository.sandboxMode);
+
   return {
     repositoryId: repository.id,
     repositoryPath: repository.path,
-    sandboxMode: repository.sandboxMode,
+    sandboxMode,
     model: repository.model,
     approvalPolicy: repository.approvalPolicy,
     codexConfigOverrides: repository.codexConfigOverrides ?? [],
@@ -803,9 +931,11 @@ function shouldReuseWorkerSession(
     return false;
   }
 
+  const sandboxMode = getEffectiveSessionSandboxMode(repository.sandboxMode);
+
   return (
     previous.repositoryPath === repository.path &&
-    previous.sandboxMode === repository.sandboxMode &&
+    previous.sandboxMode === sandboxMode &&
     previous.model === repository.model &&
     previous.approvalPolicy === repository.approvalPolicy &&
     Boolean(previous.allowCodexNetworkAccess) ===
@@ -835,8 +965,9 @@ function repositoryBindingsEquivalent(
 function buildHandlerSessionConfig(config: BridgeConfig): HandlerSessionBinding {
   return {
     workspacePath: config.handlerWorkspacePath,
-    sandboxMode: config.handlerSandboxMode,
-    model: config.handlerModel
+    sandboxMode: getEffectiveSessionSandboxMode(config.handlerSandboxMode),
+    model: config.handlerModel,
+    sessionConfigVersion: HANDLER_SESSION_CONFIG_VERSION
   };
 }
 
@@ -858,8 +989,13 @@ function handlerSessionConfigsEqual(
   return (
     left?.workspacePath === right?.workspacePath &&
     left?.sandboxMode === right?.sandboxMode &&
-    left?.model === right?.model
+    left?.model === right?.model &&
+    left?.sessionConfigVersion === right?.sessionConfigVersion
   );
+}
+
+function getEffectiveSessionSandboxMode(_: SandboxMode): SandboxMode {
+  return EFFECTIVE_SESSION_SANDBOX_MODE;
 }
 
 function resetBinding(
@@ -917,16 +1053,31 @@ function resetBinding(
   };
 }
 
-function buildResetMessage(scope: "worker" | "binding" | "context" | "all"): string {
+function buildResetMessage(
+  scope: "worker" | "binding" | "context" | "all",
+  language: ConversationLanguage
+): string {
   switch (scope) {
     case "worker":
-      return "Cleared the worker Codex session for this thread.";
+      return localize(language, {
+        en: "Cleared the worker Codex session for this thread.",
+        zh: "已清除当前线程的 worker Codex session。"
+      });
     case "binding":
-      return "Cleared the repository binding for this thread.";
+      return localize(language, {
+        en: "Cleared the repository binding for this thread.",
+        zh: "已清除当前线程的仓库绑定。"
+      });
     case "context":
-      return "Cleared Codex context for this thread and kept the current repository binding.";
+      return localize(language, {
+        en: "Cleared Codex context for this thread and kept the current repository binding.",
+        zh: "已清除当前线程的 Codex 上下文，并保留当前仓库绑定。"
+      });
     case "all":
-      return "Cleared the handler session and repository binding for this thread.";
+      return localize(language, {
+        en: "Cleared the handler session and repository binding for this thread.",
+        zh: "已清除当前线程的 handler session 和仓库绑定。"
+      });
   }
 }
 
@@ -937,14 +1088,21 @@ function touchBinding(binding: ConversationBinding): ConversationBinding {
   };
 }
 
-function buildWorkerReply(output: string): string {
-  return output.trim() ? output : "Codex completed the requested work.";
+function buildWorkerReply(output: string, language: ConversationLanguage): string {
+  return (
+    output.trim() ||
+    localize(language, {
+      en: "Codex completed the requested work.",
+      zh: "Codex 已完成所请求的工作。"
+    })
+  );
 }
 
 function clipMessage(
   text: string,
   maxChars: number,
-  attachments?: OutboundMessage["attachments"]
+  attachments: OutboundMessage["attachments"] | undefined,
+  language: ConversationLanguage
 ): OutboundMessage {
   if (text.length <= maxChars) {
     return {
@@ -955,7 +1113,10 @@ function clipMessage(
   }
 
   return {
-    text: `${text.slice(0, maxChars - 16)}\n\n[truncated...]`,
+    text: `${text.slice(0, maxChars - 16)}\n\n${localize(language, {
+      en: "[truncated...]",
+      zh: "[内容已截断...]"
+    })}`,
     truncated: true,
     attachments
   };
@@ -1079,6 +1240,7 @@ interface CodexProgressContext {
   actor: CodexProgressActor;
   repositoryId?: string;
   announceTurnStart: boolean;
+  language: ConversationLanguage;
 }
 
 class CodexRunProgressReporter {
@@ -1166,7 +1328,7 @@ class CodexRunProgressReporter {
     this.workingIndicatorVisible = true;
     this.pending = this.pending.then(async () => {
       try {
-        await this.publisher.refreshWorkingIndicator?.(this.turn);
+        await this.publisher.refreshWorkingIndicator?.(this.turn, this.context.language);
       } catch {
         // Typing indicator failures should not abort the turn.
       }
@@ -1181,7 +1343,7 @@ class CodexRunProgressReporter {
     this.workingIndicatorVisible = true;
     this.pending = this.pending.then(async () => {
       try {
-        await this.publisher.showWorkingIndicator?.(this.turn);
+        await this.publisher.showWorkingIndicator?.(this.turn, this.context.language);
       } catch {
         // Typing indicator failures should not abort the turn.
       }
@@ -1196,7 +1358,7 @@ class CodexRunProgressReporter {
     this.workingIndicatorVisible = false;
     this.pending = this.pending.then(async () => {
       try {
-        await this.publisher.hideWorkingIndicator?.(this.turn);
+        await this.publisher.hideWorkingIndicator?.(this.turn, this.context.language);
       } catch {
         // Typing indicator failures should not abort the turn.
       }
@@ -1231,7 +1393,7 @@ class CodexRunProgressReporter {
     this.sentCount += 1;
     this.pending = this.pending.then(async () => {
       try {
-        await this.publisher.publishProgress(this.turn, message);
+        await this.publisher.publishProgress(this.turn, message, this.context.language);
       } catch {
         // Progress updates should not abort the turn.
       }
@@ -1262,10 +1424,16 @@ function describeProgressEvent(
 
 function buildHeartbeatMessage(context: CodexProgressContext): string {
   if (context.actor === "worker") {
-    return `Codex is still working in \`${context.repositoryId ?? "the bound repository"}\`.`;
+    return localize(context.language, {
+      en: `Codex is still working in \`${context.repositoryId ?? "the bound repository"}\`.`,
+      zh: `Codex 仍在仓库 \`${context.repositoryId ?? "当前绑定的仓库"}\` 中继续处理。`
+    });
   }
 
-  return "Codex is still working on your request.";
+  return localize(context.language, {
+    en: "Codex is still working on your request.",
+    zh: "Codex 仍在处理你的请求。"
+  });
 }
 
 function buildItemCompletedMessage(
@@ -1290,7 +1458,10 @@ function buildItemCompletedMessage(
     item.exit_code !== 0
   ) {
     return toProgressMessage(
-      `${actorLabel(context)} saw a command exit with code ${item.exit_code} and is continuing.`,
+      localize(context.language, {
+        en: `${actorLabel(context)} saw a command exit with code ${item.exit_code} and is continuing.`,
+        zh: `${actorLabel(context)} 发现某个命令以退出码 ${item.exit_code} 结束，正在继续处理。`
+      }),
       "status"
     );
   }
@@ -1300,10 +1471,16 @@ function buildItemCompletedMessage(
 
 function actorLabel(context: CodexProgressContext): string {
   if (context.actor === "worker") {
-    return `Codex in \`${context.repositoryId ?? "the bound repository"}\``;
+    return localize(context.language, {
+      en: `Codex in \`${context.repositoryId ?? "the bound repository"}\``,
+      zh: `仓库 \`${context.repositoryId ?? "当前绑定的仓库"}\` 中的 Codex`
+    });
   }
 
-  return "Codex";
+  return localize(context.language, {
+    en: "Codex",
+    zh: "Codex"
+  });
 }
 
 function formatFileChangeMessage(
@@ -1316,7 +1493,7 @@ function formatFileChangeMessage(
   }
 
   const summarized = changes
-    .map((change) => summarizeFileChange(change))
+    .map((change) => summarizeFileChange(change, context.language))
     .filter((value): value is string => Boolean(value));
 
   if (summarized.length === 0) {
@@ -1326,7 +1503,10 @@ function formatFileChangeMessage(
   return `${actorLabel(context)} ${summarized.join(", ")}.`;
 }
 
-function summarizeFileChange(change: unknown): string | undefined {
+function summarizeFileChange(
+  change: unknown,
+  language: ConversationLanguage
+): string | undefined {
   if (!isRecord(change) || typeof change.path !== "string" || typeof change.kind !== "string") {
     return undefined;
   }
@@ -1335,11 +1515,20 @@ function summarizeFileChange(change: unknown): string | undefined {
 
   switch (change.kind) {
     case "create":
-      return `created ${fileLabel}`;
+      return localize(language, {
+        en: `created ${fileLabel}`,
+        zh: `创建了 ${fileLabel}`
+      });
     case "update":
-      return `updated ${fileLabel}`;
+      return localize(language, {
+        en: `updated ${fileLabel}`,
+        zh: `更新了 ${fileLabel}`
+      });
     case "delete":
-      return `deleted ${fileLabel}`;
+      return localize(language, {
+        en: `deleted ${fileLabel}`,
+        zh: `删除了 ${fileLabel}`
+      });
     default:
       return `${change.kind} ${fileLabel}`;
   }

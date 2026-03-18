@@ -155,6 +155,66 @@ test("thread replies after bind go straight to the worker session and reuse it",
   assert.deepEqual(invocations, ["worker:new", "resume:worker-session"]);
 });
 
+test("thread system prompts use Chinese when the stored conversation language is Chinese", async (t) => {
+  const harness = createHarness();
+  t.after(() => harness.cleanup());
+
+  writeFileSync(
+    harness.paths.sessionStorePath,
+    JSON.stringify(
+      {
+        bindings: [
+          {
+            key: {
+              platform: "slack",
+              workspaceId: "T111",
+              channelId: "C222",
+              threadId: "1000"
+            },
+            language: "zh",
+            createdByUserId: "U111",
+            createdAt: "2026-03-18T00:00:00.000Z",
+            updatedAt: "2026-03-18T00:00:00.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )
+  );
+
+  const bot = new SlackBot();
+  await bot.refreshSlackClient();
+  harness.resetRecords();
+
+  await bot.handleEventRequest(
+    Buffer.from(
+      JSON.stringify({
+        type: "event_callback",
+        team_id: "T111",
+        event_id: "evt-zh-empty",
+        event: {
+          type: "message",
+          user: "U111",
+          text: "   ",
+          channel: "C222",
+          channel_type: "channel",
+          ts: "1710000003.000400",
+          thread_ts: "1000"
+        }
+      })
+    ),
+    createResponseRecorder()
+  );
+
+  assert.deepEqual(
+    harness.records.map((record) => record.kind),
+    ["chat.postMessage"]
+  );
+  assert.equal(harness.records[0].body.thread_ts, "1000");
+  assert.equal(harness.records[0].body.text, "请回复一条发给 Codex 的消息，或使用 `/codex help`。");
+});
+
 function createHarness() {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-slack-test-"));
   const repoDir = path.join(root, "repo");
@@ -243,7 +303,8 @@ function createHarness() {
   return {
     paths: {
       root,
-      invocationLogPath
+      invocationLogPath,
+      sessionStorePath
     },
     records,
     reactionRecords,

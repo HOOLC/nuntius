@@ -20,6 +20,11 @@ import {
 
 import { DiscordAdapter } from "./adapters/discord.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
+import {
+  detectConversationLanguage,
+  localize,
+  resolveConversationLanguage
+} from "./conversation-language.js";
 import { loadDiscordBotConfig } from "./discord-config.js";
 import {
   sendDiscordInteractionResponse,
@@ -28,6 +33,7 @@ import {
   type DiscordSendableChannel
 } from "./discord-delivery.js";
 import type { Attachment, ProcessingStatus } from "./domain.js";
+import { isProcessGuardActive, PROCESS_RESTART_EXIT_CODE } from "./process-guard.js";
 import {
   isSupervisorToWorkerMessage,
   type DiscordWorkerMode,
@@ -277,7 +283,9 @@ class DiscordBotWorker {
           if (this.isSupervisorAvailable()) {
             await replyEphemeral(
               interaction,
-              "Restart requested. The supervisor will exit now; start it again or use an external service manager."
+              isProcessGuardActive()
+                ? "Restart requested. The supervisor will exit now and the bundled guard will start a fresh process."
+                : "Restart requested. The supervisor will exit now; start it again or use an external service manager."
             );
             sendWorkerMessage({
               type: "request_restart"
@@ -287,11 +295,13 @@ class DiscordBotWorker {
 
           await replyEphemeral(
             interaction,
-            "Restart requested. The process will exit now; an external supervisor must start it again."
+            isProcessGuardActive()
+              ? "Restart requested. The process will exit now and the bundled guard will start a fresh process."
+              : "Restart requested. The process will exit now; an external supervisor must start it again."
           );
           setTimeout(() => {
             this.client.destroy();
-            process.exit(75);
+            process.exit(PROCESS_RESTART_EXIT_CODE);
           }, 250);
           return;
         default:
@@ -342,8 +352,17 @@ class DiscordBotWorker {
       followUp: (message) => sendDiscordText(target.outputChannel, message)
     });
 
+    const language = detectConversationLanguage(prompt);
     await ack.complete(
-      target.threadId ? `Continuing in <#${target.threadId}>.` : "Continuing in this DM."
+      target.threadId
+        ? localize(language, {
+            en: `Continuing in <#${target.threadId}>.`,
+            zh: `将在 <#${target.threadId}> 中继续。`
+          })
+        : localize(language, {
+            en: "Continuing in this DM.",
+            zh: "将在此私聊中继续。"
+          })
     );
   }
 
@@ -372,8 +391,32 @@ class DiscordBotWorker {
       followUp: (message) => sendDiscordText(target.outputChannel, message)
     });
 
+    const status = target.threadId
+      ? await this.bridgeRuntime.bridge.getConversationStatus(
+          buildTurnSeed({
+            target,
+            userId: interaction.user.id,
+            userDisplayName:
+              interaction.member && "displayName" in interaction.member
+                ? interaction.member.displayName
+                : interaction.user.globalName ?? interaction.user.username
+          })
+        )
+      : undefined;
+    const language = resolveConversationLanguage({
+      binding: status?.binding,
+      text: repositoryId
+    });
     await ack.complete(
-      target.threadId ? `Bound in <#${target.threadId}>.` : "Bound in this DM."
+      target.threadId
+        ? localize(language, {
+            en: `Bound in <#${target.threadId}>.`,
+            zh: `已在 <#${target.threadId}> 中绑定。`
+          })
+        : localize(language, {
+            en: "Bound in this DM.",
+            zh: "已在此私聊中绑定。"
+          })
     );
   }
 
@@ -464,8 +507,18 @@ class DiscordBotWorker {
     }
 
     const text = mentionedBot ? strippedContent : message.content.trim();
+    const language = resolveConversationLanguage({
+      binding: status.binding,
+      text
+    });
     if (!text && message.attachments.size === 0) {
-      await sendDiscordText(thread, "Reply with a message for Codex or use `/codex help`.");
+      await sendDiscordText(
+        thread,
+        localize(language, {
+          en: "Reply with a message for Codex or use `/codex help`.",
+          zh: "请回复一条发给 Codex 的消息，或使用 `/codex help`。"
+        })
+      );
       return;
     }
 
@@ -493,10 +546,14 @@ class DiscordBotWorker {
     }
 
     const text = this.stripBotMention(message.content);
+    const language = detectConversationLanguage(text || message.content);
     if (!text && message.attachments.size === 0) {
       await sendDiscordText(
         asSendableChannel(message.channel),
-        "Mention me with a prompt, or use `/codex ask prompt:<text>` to start a Codex thread."
+        localize(language, {
+          en: "Mention me with a prompt, or use `/codex ask prompt:<text>` to start a Codex thread.",
+          zh: "请在提及时附上你的请求，或使用 `/codex ask prompt:<text>` 来启动一个 Codex 线程。"
+        })
       );
       return;
     }
@@ -504,17 +561,24 @@ class DiscordBotWorker {
     if (!isThreadStarterChannel(message.channel)) {
       await sendDiscordText(
         asSendableChannel(message.channel),
-        [
-          "Start Codex from a text channel, announcement channel, existing thread, or a DM.",
-          `Detected channel type: ${describeDiscordChannelType(message.channel)}.`
-        ].join(" ")
+        localize(language, {
+          en: [
+            "Start Codex from a text channel, announcement channel, existing thread, or a DM.",
+            `Detected channel type: ${describeDiscordChannelType(message.channel)}.`
+          ].join(" "),
+          zh: [
+            "请在文本频道、公告频道、现有线程或私聊中启动 Codex。",
+            `检测到的频道类型：${describeDiscordChannelType(message.channel)}。`
+          ].join(" ")
+        })
       );
       return;
     }
 
     const thread = await this.createConversationThread(message.channel, {
       userLabel: message.member?.displayName ?? message.author.username,
-      promptSeed: text
+      promptSeed: text,
+      language
     });
     const target = this.buildConversationTargetForThread(thread);
 
@@ -553,11 +617,18 @@ class DiscordBotWorker {
     }
 
     if (!interaction.channel || !isThreadStarterChannel(interaction.channel)) {
+      const language = detectConversationLanguage(options.promptSeed);
       throw new Error(
-        [
-          "This command can create a Codex thread only from a guild text channel, an announcement channel, or a DM.",
-          `Detected channel type: ${describeDiscordChannelType(interaction.channel)}.`
-        ].join(" ")
+        localize(language, {
+          en: [
+            "This command can create a Codex thread only from a guild text channel, an announcement channel, or a DM.",
+            `Detected channel type: ${describeDiscordChannelType(interaction.channel)}.`
+          ].join(" "),
+          zh: [
+            "该命令只能在服务器文本频道、公告频道或私聊中创建 Codex 线程。",
+            `检测到的频道类型：${describeDiscordChannelType(interaction.channel)}。`
+          ].join(" ")
+        })
       );
     }
 
@@ -566,7 +637,8 @@ class DiscordBotWorker {
         interaction.member && "displayName" in interaction.member
           ? interaction.member.displayName
           : interaction.user.username,
-      promptSeed: options.promptSeed
+      promptSeed: options.promptSeed,
+      language: detectConversationLanguage(options.promptSeed)
     });
 
     return this.buildConversationTargetForThread(thread);
@@ -613,10 +685,14 @@ class DiscordBotWorker {
     options: {
       userLabel: string;
       promptSeed: string;
+      language: "en" | "zh";
     }
   ): Promise<PublicThreadChannel<false>> {
     const starterMessage = await channel.send({
-      content: `Codex thread for ${options.userLabel}`
+      content: localize(options.language, {
+        en: `Codex thread for ${options.userLabel}`,
+        zh: `${options.userLabel} 的 Codex 线程`
+      })
     });
 
     return starterMessage.startThread({

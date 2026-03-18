@@ -1,4 +1,5 @@
-import type { SandboxMode } from "./domain.js";
+import { localize } from "./conversation-language.js";
+import type { ConversationLanguage, SandboxMode } from "./domain.js";
 
 export interface CodexNetworkAccessConfig {
   allowCodexNetworkAccess?: boolean;
@@ -22,68 +23,112 @@ export function hasCodexNetworkAccess(
 }
 
 export function formatCodexNetworkAccess(
-  value: CodexNetworkAccessConfig | undefined
+  value: CodexNetworkAccessConfig | undefined,
+  language: ConversationLanguage = "en"
 ): string {
   if (!hasCodexNetworkAccess(value)) {
-    return "disabled for this repository";
+    return localize(language, {
+      en: "disabled for this repository",
+      zh: "此仓库未启用"
+    });
   }
 
-  return `requested via ${formatCodexNetworkAccessRequest(value)} (${value.codexNetworkAccessWorkspacePath})`;
+  return localize(language, {
+    en: `requested via ${formatCodexNetworkAccessRequest(value)} (${value.codexNetworkAccessWorkspacePath})`,
+    zh: `已通过 ${formatCodexNetworkAccessRequest(value)} 请求 (${value.codexNetworkAccessWorkspacePath})`
+  });
 }
 
 export function buildCodexNetworkAccessStartNote(
-  value: CodexNetworkAccessConfig | undefined
+  value: CodexNetworkAccessConfig | undefined,
+  language: ConversationLanguage = "en"
 ): string | undefined {
   if (!hasCodexNetworkAccess(value)) {
     return undefined;
   }
 
-  return `Network access requested via ${formatCodexNetworkAccessRequest(value)}; artifacts workspace: \`${value.codexNetworkAccessWorkspacePath}\`. The host must still allow Codex to reach chatgpt.com and let worker tools resolve/connect to external hosts.`;
+  return localize(language, {
+    en: `Network access requested via ${formatCodexNetworkAccessRequest(value)}; artifacts workspace: \`${value.codexNetworkAccessWorkspacePath}\`. The host must still allow Codex to reach chatgpt.com and let worker tools resolve/connect to external hosts.`,
+    zh: `已通过 ${formatCodexNetworkAccessRequest(value)} 请求网络访问；产物工作区：\`${value.codexNetworkAccessWorkspacePath}\`。宿主环境仍需允许 Codex 访问 chatgpt.com，并允许工作进程解析并连接外部主机。`
+  });
 }
 
 export function buildCodexNetworkAccessFailureMessage(
   value: CodexNetworkAccessConfig | undefined,
-  errorMessage: string
+  errorMessage: string,
+  language: ConversationLanguage = "en"
 ): string {
   if (!hasCodexNetworkAccess(value)) {
     return errorMessage;
   }
 
-  if (errorMessage.includes("Codex network access was requested for this worker session")) {
+  if (
+    errorMessage.includes("Codex network access was requested for this worker session") ||
+    errorMessage.includes("此 worker session 已请求 Codex 网络访问")
+  ) {
     return errorMessage;
   }
 
-  const lines = [
-    `Codex network access was requested for this worker session via ${formatCodexNetworkAccessRequest(value)}.`,
-    `Artifacts workspace: ${value.codexNetworkAccessWorkspacePath}.`
-  ];
+  const lines = localize(language, {
+    en: [
+      `Codex network access was requested for this worker session via ${formatCodexNetworkAccessRequest(value)}.`,
+      `Artifacts workspace: ${value.codexNetworkAccessWorkspacePath}.`
+    ],
+    zh: [
+      `此 worker session 已通过 ${formatCodexNetworkAccessRequest(value)} 请求 Codex 网络访问。`,
+      `产物工作区：${value.codexNetworkAccessWorkspacePath}。`
+    ]
+  });
 
   if (errorMessage.includes("unexpected argument '--search'")) {
     lines.push(
-      "The installed Codex CLI does not support `--search`; upgrade Codex or disable allow_codex_network_access for this repository target."
+      localize(language, {
+        en: "The installed Codex CLI does not support `--search`; upgrade Codex or disable allow_codex_network_access for this repository target.",
+        zh: "当前安装的 Codex CLI 不支持 `--search`；请升级 Codex，或为该仓库目标关闭 allow_codex_network_access。"
+      })
     );
   } else {
     lines.push(
-      "The host Codex runtime and OS/network policy must still allow outbound access; nuntius cannot bypass those limits."
+      localize(language, {
+        en: "The host Codex runtime and OS/network policy must still allow outbound access; nuntius cannot bypass those limits.",
+        zh: "宿主机上的 Codex 运行时以及操作系统/网络策略仍需允许对外访问；nuntius 无法绕过这些限制。"
+      })
     );
-    lines.push(...buildHostNetworkDiagnostics(errorMessage));
+    lines.push(...buildHostNetworkDiagnostics(errorMessage, language));
   }
 
-  return [...lines, "", "Original error:", errorMessage].join("\n");
+  return [
+    ...lines,
+    "",
+    localize(language, {
+      en: "Original error:",
+      zh: "原始错误："
+    }),
+    errorMessage
+  ].join("\n");
 }
 
-function buildHostNetworkDiagnostics(errorMessage: string): string[] {
+function buildHostNetworkDiagnostics(
+  errorMessage: string,
+  language: ConversationLanguage
+): string[] {
   const diagnostics: string[] = [];
 
   if (hasSocketPermissionFailure(errorMessage)) {
     diagnostics.push(
-      "Detected outbound socket blocking while the Codex CLI was trying to reach chatgpt.com over WebSocket/HTTPS; fix the host sandbox or firewall so Codex itself can open external connections."
+      localize(language, {
+        en: "Detected outbound socket blocking while the Codex CLI was trying to reach chatgpt.com over WebSocket/HTTPS; fix the host sandbox or firewall so Codex itself can open external connections.",
+        zh: "检测到 Codex CLI 通过 WebSocket/HTTPS 访问 chatgpt.com 时被阻止建立外连 socket；请调整宿主机沙箱或防火墙，确保 Codex 本身可以访问外网。"
+      })
     );
   }
 
   if (hasDnsResolutionFailure(errorMessage)) {
     diagnostics.push(
-      "Detected DNS resolution failure for an external host; fix the host resolver/proxy/network setup so worker tools such as git, ssh, and curl can resolve remote names."
+      localize(language, {
+        en: "Detected DNS resolution failure for an external host; fix the host resolver/proxy/network setup so worker tools such as git, ssh, and curl can resolve remote names.",
+        zh: "检测到外部主机 DNS 解析失败；请修复宿主机的解析器、代理或网络配置，确保 git、ssh、curl 等工具可以解析远程主机名。"
+      })
     );
   }
 

@@ -1,6 +1,7 @@
 import { formatAttachmentsForPrompt } from "./attachments.js";
+import { describeConversationLanguage } from "./conversation-language.js";
 import type { RepositoryTarget } from "./config.js";
-import type { ConversationBinding, InboundTurn } from "./domain.js";
+import type { ConversationBinding, ConversationLanguage, InboundTurn } from "./domain.js";
 
 export type HandlerDecision =
   | {
@@ -29,8 +30,15 @@ export function buildHandlerUserPrompt(input: {
   state: ConversationBinding;
   availableRepositories: RepositoryTarget[];
   requireExplicitRepositorySelection: boolean;
+  conversationLanguage: ConversationLanguage;
 }): string {
-  const { turn, state, availableRepositories, requireExplicitRepositorySelection } = input;
+  const {
+    turn,
+    state,
+    availableRepositories,
+    requireExplicitRepositorySelection,
+    conversationLanguage
+  } = input;
   const lines = [
     "You are the handler Codex session for an IM bridge thread that is not currently routed straight to a bound worker session.",
     "You decide whether to reply directly, bind a repository, or reset state before repo-scoped work continues in the bound worker session.",
@@ -49,12 +57,14 @@ export function buildHandlerUserPrompt(input: {
     "- If no repository is bound and the user asks for repo work, ask which repository to use unless it is already explicit.",
     "- Use bind_repo with continueWithWorkerPrompt when the user explicitly names a repository and also wants immediate repo work.",
     "- Use reply for clarification, conversational answers, repo questions, and status-style answers.",
+    `- Reply to the user in ${describeConversationLanguage(conversationLanguage)}.`,
     `- Explicit repository selection required: ${String(requireExplicitRepositorySelection)}.`,
     "",
     "Conversation state:",
     `- Platform: ${turn.platform}`,
     `- Scope: ${turn.scope}`,
     `- User: ${turn.userDisplayName ?? turn.userId} (${turn.userId})`,
+    `- Preferred reply language: ${describeConversationLanguage(conversationLanguage)}`,
     `- Handler session exists: ${String(Boolean(state.handlerSessionId))}`,
     `- Active repository: ${state.activeRepository?.repositoryId ?? "none"}`,
     `- Worker session exists: ${String(Boolean(state.activeRepository?.workerSessionId))}`,

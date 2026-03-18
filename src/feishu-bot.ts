@@ -16,10 +16,20 @@ import {
   type FeishuEnvelope
 } from "./adapters/feishu.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
+import {
+  detectConversationLanguage,
+  localize,
+  resolveConversationLanguage
+} from "./conversation-language.js";
 import type { BridgeCommand } from "./interaction-router.js";
 import { parseBridgeCommand } from "./interaction-router.js";
 import { loadFeishuBotConfig, type FeishuBotConfig } from "./feishu-config.js";
 import type { Attachment, InboundTurn, ProcessingStatus } from "./domain.js";
+import {
+  isProcessGuardActive,
+  PROCESS_RESTART_EXIT_CODE,
+  runModuleWithRestartGuard
+} from "./process-guard.js";
 
 const EVENT_DEDUP_TTL_MS = 10 * 60_000;
 const WORKER_BOOT_TIMEOUT_MS = 30_000;
@@ -29,6 +39,7 @@ const BUILD_OUTPUT_LINE_LIMIT = 40;
 const BUILD_OUTPUT_CHAR_LIMIT = 3500;
 const BRIDGE_PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const FEISHU_ATTACHMENT_ROOT = path.join(os.tmpdir(), "nuntius-feishu-attachments");
+const FEISHU_MODULE_PATH = fileURLToPath(import.meta.url);
 
 interface FeishuBotInfoResponse {
   code: number;
@@ -324,8 +335,17 @@ export class FeishuBot {
     sourceMessageId: string;
     receivedAt: string;
   }): Promise<void> {
+    const language = resolveConversationLanguage({
+      text: input.text
+    });
     if (!input.text && input.attachments.length === 0) {
-      await this.postConversationFailure(input.target, "Send a message for Codex or use `/codex help`.");
+      await this.postConversationFailure(
+        input.target,
+        localize(language, {
+          en: "Send a message for Codex or use `/codex help`.",
+          zh: "请发送一条给 Codex 的消息，或使用 `/codex help`。"
+        })
+      );
       return;
     }
 
@@ -354,6 +374,10 @@ export class FeishuBot {
     const status = await this.bridgeRuntime.bridge.getConversationStatus(
       buildFeishuTurnSeed(input.target, input.userId)
     );
+    const language = resolveConversationLanguage({
+      binding: status.binding,
+      text: input.text
+    });
 
     if (!status.binding && !input.mentionedBot && !looksLikeCodexCommand) {
       return;
@@ -362,7 +386,10 @@ export class FeishuBot {
     if (!input.text && input.attachments.length === 0) {
       await this.postConversationFailure(
         input.target,
-        "Reply with a message for Codex or use `/codex help`."
+        localize(language, {
+          en: "Reply with a message for Codex or use `/codex help`.",
+          zh: "请回复一条发给 Codex 的消息，或使用 `/codex help`。"
+        })
       );
       return;
     }
@@ -389,6 +416,9 @@ export class FeishuBot {
     receivedAt: string;
   }): Promise<void> {
     const looksLikeCodexCommand = input.text.startsWith("/codex");
+    const language = resolveConversationLanguage({
+      text: input.text
+    });
     if (!looksLikeCodexCommand && !input.mentionedBot) {
       return;
     }
@@ -410,7 +440,7 @@ export class FeishuBot {
         return;
       }
 
-      const threadTarget = await this.createThreadTarget(input.target);
+      const threadTarget = await this.createThreadTarget(input.target, language);
       await this.adapter.handleTurn(
         this.buildFeishuEnvelope({
           target: threadTarget,
@@ -427,12 +457,15 @@ export class FeishuBot {
     if (!input.text && input.attachments.length === 0) {
       await this.postConversationFailure(
         input.target,
-        "Mention me with a prompt, or use `/codex help` in the thread after I reply."
+        localize(language, {
+          en: "Mention me with a prompt, or use `/codex help` in the thread after I reply.",
+          zh: "请在提及时附上你的请求，或等我回复后在该线程里使用 `/codex help`。"
+        })
       );
       return;
     }
 
-    const threadTarget = await this.createThreadTarget(input.target);
+    const threadTarget = await this.createThreadTarget(input.target, language);
     await this.adapter.handleTurn(
       this.buildFeishuEnvelope({
         target: threadTarget,
@@ -574,7 +607,9 @@ export class FeishuBot {
           if (this.isSupervisorAvailable()) {
             await this.postAdminMessage(
               input.target,
-              "Restart requested. The supervisor will exit now; start it again or use an external service manager."
+              isProcessGuardActive()
+                ? "Restart requested. The supervisor will exit now and the bundled guard will start a fresh process."
+                : "Restart requested. The supervisor will exit now; start it again or use an external service manager."
             );
             this.sendWorkerMessage({
               type: "request_restart"
@@ -584,10 +619,12 @@ export class FeishuBot {
 
           await this.postAdminMessage(
             input.target,
-            "Restart requested. The process will exit now; an external supervisor must start it again."
+            isProcessGuardActive()
+              ? "Restart requested. The process will exit now and the bundled guard will start a fresh process."
+              : "Restart requested. The process will exit now; an external supervisor must start it again."
           );
           setTimeout(() => {
-            process.exit(75);
+            process.exit(PROCESS_RESTART_EXIT_CODE);
           }, 250);
           return;
         default:
@@ -601,14 +638,22 @@ export class FeishuBot {
     }
   }
 
-  private async createThreadTarget(target: FeishuConversationTarget): Promise<FeishuConversationTarget> {
+  private async createThreadTarget(
+    target: FeishuConversationTarget,
+    language: "en" | "zh"
+  ): Promise<FeishuConversationTarget> {
     if (target.scope !== "channel" || !target.replyMessageId) {
       return target;
     }
 
     const starter = await this.feishuApi.replyMessage({
       messageId: target.replyMessageId,
-      message: renderFeishuTextMessage("Codex thread"),
+      message: renderFeishuTextMessage(
+        localize(language, {
+          en: "Codex thread",
+          zh: "Codex 线程"
+        })
+      ),
       replyInThread: true
     });
 
@@ -1564,6 +1609,25 @@ function sendWorkerMessage(message: FeishuWorkerToSupervisorMessage): void {
   process.send(message);
 }
 
+async function sendWorkerMessageAndExit(
+  message: FeishuWorkerToSupervisorMessage
+): Promise<void> {
+  if (typeof process.send === "function") {
+    await new Promise<void>((resolve, reject) => {
+      process.send?.(message, (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+  }
+
+  process.exit(0);
+}
+
 async function rebuildFeishuBridge(): Promise<{
   ok: boolean;
   output: string;
@@ -1802,7 +1866,7 @@ class FeishuBotSupervisor {
         return;
       case "request_restart":
         console.log("Supervisor exit requested by Feishu admin command.");
-        void this.shutdownAndExit(75);
+        void this.shutdownAndExit(PROCESS_RESTART_EXIT_CODE);
         return;
     }
   }
@@ -1972,23 +2036,22 @@ function resolveWorkerMode(raw: string | undefined): FeishuWorkerMode | undefine
 
 async function startFeishuWorker(mode: FeishuWorkerMode): Promise<void> {
   const bot = new FeishuBot();
-  installSupervisorMessageHandler(bot);
 
   if (mode === "probe") {
-    await bot.refreshFeishuClient();
-    sendWorkerMessage({
+    await sendWorkerMessageAndExit({
       type: "probe_ready"
     });
     return;
   }
 
+  installSupervisorMessageHandler(bot);
   await bot.start();
   sendWorkerMessage({
     type: "ready"
   });
 }
 
-export async function main(): Promise<void> {
+async function runFeishuProcess(): Promise<void> {
   const workerMode = resolveWorkerMode(process.env.NUNTIUS_FEISHU_WORKER_MODE);
   if (workerMode) {
     await startFeishuWorker(workerMode);
@@ -1997,6 +2060,18 @@ export async function main(): Promise<void> {
 
   const supervisor = new FeishuBotSupervisor();
   await supervisor.start();
+}
+
+export async function main(): Promise<void> {
+  if (!resolveWorkerMode(process.env.NUNTIUS_FEISHU_WORKER_MODE) && !isProcessGuardActive()) {
+    await runModuleWithRestartGuard({
+      label: "Feishu bot",
+      modulePath: FEISHU_MODULE_PATH
+    });
+    return;
+  }
+
+  await runFeishuProcess();
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

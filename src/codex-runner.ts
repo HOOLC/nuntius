@@ -172,7 +172,8 @@ function buildResumeArgs(request: CodexTurnRequest): string[] {
   }
 
   appendConfigArgs(args, request);
-  appendAddDirArgs(args, request.addDirs);
+  // `codex exec resume` does not accept `--add-dir`; only new sessions can add
+  // writable roots beyond the primary workspace.
   args.push(request.sessionId, request.prompt);
   return args;
 }

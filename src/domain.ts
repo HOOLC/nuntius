@@ -1,5 +1,6 @@
 export type ChatPlatform = "slack" | "discord" | "feishu";
 export type ConversationScope = "dm" | "channel" | "thread";
+export type ConversationLanguage = "en" | "zh";
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
 export type ProcessingStatus = "queued" | "working" | "finished" | "failed" | "interrupted";
@@ -51,10 +52,12 @@ export interface HandlerSessionBinding {
   workspacePath: string;
   sandboxMode: SandboxMode;
   model?: string;
+  sessionConfigVersion?: number;
 }
 
 export interface ConversationBinding {
   key: ConversationKey;
+  language?: ConversationLanguage;
   handlerSessionId?: string;
   handlerConfig?: HandlerSessionBinding;
   activeRepository?: RepositoryBinding;

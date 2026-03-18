@@ -1,6 +1,8 @@
+import { localize } from "../conversation-language.js";
 import type {
   Attachment,
   ConversationBinding,
+  ConversationLanguage,
   InboundTurn,
   OutboundMessage,
   ProcessingStatus
@@ -65,22 +67,36 @@ class FeishuPublisher implements TurnPublisher {
 
   constructor(private readonly envelope: FeishuEnvelope) {}
 
-  async publishQueued(): Promise<void> {
+  async publishQueued(_: InboundTurn, language: ConversationLanguage): Promise<void> {
     await this.syncProcessingStatus("queued");
     await this.envelope.postMessage(
-      renderFeishuStatus("Queued", "Queued behind the active Codex turn for this conversation.")
+      renderFeishuStatus(
+        localize(language, {
+          en: "Queued",
+          zh: "已排队"
+        }),
+        localize(language, {
+          en: "Queued behind the active Codex turn for this conversation.",
+          zh: "当前会话已有进行中的 Codex turn，本条消息已进入队列。"
+        })
+      )
     );
   }
 
   async publishStarted(
-    _: InboundTurn,
+    _turn: InboundTurn,
     _binding: ConversationBinding,
-    _note?: string
+    _note: string | undefined,
+    _language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
   }
 
-  async publishProgress(_: InboundTurn, message: string): Promise<void> {
+  async publishProgress(
+    _: InboundTurn,
+    message: string,
+    _language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("working");
     const progressMessage = renderFeishuTextMessage(message);
     if (await this.replaceWorkingPlaceholder(progressMessage)) {
@@ -90,9 +106,13 @@ class FeishuPublisher implements TurnPublisher {
     await this.envelope.postMessage(progressMessage);
   }
 
-  async publishCompleted(_: InboundTurn, message: OutboundMessage): Promise<void> {
+  async publishCompleted(
+    _: InboundTurn,
+    message: OutboundMessage,
+    language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("finished");
-    const replyMessage = renderFeishuReply(message.text, message.truncated);
+    const replyMessage = renderFeishuReply(message.text, message.truncated, language);
     if (!(await this.replaceWorkingPlaceholder(replyMessage))) {
       await this.envelope.postMessage(replyMessage);
     }
@@ -112,37 +132,78 @@ class FeishuPublisher implements TurnPublisher {
       } catch (error) {
         await this.envelope.postMessage(
           renderFeishuStatus(
-            "Attachment upload failed",
-            `Could not return "${attachment.name}": ${formatAttachmentFailure(error)}`
+            localize(language, {
+              en: "Attachment upload failed",
+              zh: "附件上传失败"
+            }),
+            localize(language, {
+              en: `Could not return "${attachment.name}": ${formatAttachmentFailure(error)}`,
+              zh: `无法返回 "${attachment.name}"：${formatAttachmentFailure(error)}`
+            })
           )
         );
       }
     }
   }
 
-  async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
+  async publishInterrupted(
+    _: InboundTurn,
+    message: string,
+    language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("interrupted");
-    if (await this.replaceWorkingPlaceholder(renderFeishuStatus("Interrupted", message))) {
+    if (
+      await this.replaceWorkingPlaceholder(
+        renderFeishuStatus(
+          localize(language, {
+            en: "Interrupted",
+            zh: "已中断"
+          }),
+          message
+        )
+      )
+    ) {
       return;
     }
 
-    await this.envelope.postMessage(renderFeishuStatus("Interrupted", message));
+    await this.envelope.postMessage(
+      renderFeishuStatus(
+        localize(language, {
+          en: "Interrupted",
+          zh: "已中断"
+        }),
+        message
+      )
+    );
   }
 
-  async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
+  async publishFailed(
+    _: InboundTurn,
+    errorMessage: string,
+    language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("failed");
-    if (await this.replaceWorkingPlaceholder(renderFeishuError(errorMessage))) {
+    if (await this.replaceWorkingPlaceholder(renderFeishuError(errorMessage, language))) {
       return;
     }
 
-    await this.envelope.postMessage(renderFeishuError(errorMessage));
+    await this.envelope.postMessage(renderFeishuError(errorMessage, language));
   }
 
-  async refreshWorkingIndicator(): Promise<void> {
+  async refreshWorkingIndicator(
+    _turn: InboundTurn,
+    language: ConversationLanguage
+  ): Promise<void> {
     await this.syncProcessingStatus("working");
     const placeholder = renderFeishuStatus(
-      "Working",
-      `Still working. Last update: ${formatFeishuWorkingTimestamp(new Date())}`
+      localize(language, {
+        en: "Working",
+        zh: "处理中"
+      }),
+      localize(language, {
+        en: `Still working. Last update: ${formatFeishuWorkingTimestamp(new Date())}`,
+        zh: `仍在处理中。最近更新：${formatFeishuWorkingTimestamp(new Date())}`
+      })
     );
 
     if (this.workingPlaceholderMessageId && this.envelope.updateMessage) {
@@ -156,7 +217,10 @@ class FeishuPublisher implements TurnPublisher {
     }
   }
 
-  async hideWorkingIndicator(): Promise<void> {
+  async hideWorkingIndicator(
+    _turn: InboundTurn,
+    _language: ConversationLanguage
+  ): Promise<void> {
     return undefined;
   }
 
@@ -215,15 +279,38 @@ function renderFeishuStatus(title: string, body: string): FeishuChatMessage {
   return renderFeishuTextMessage(text);
 }
 
-function renderFeishuReply(body: string, truncated: boolean | undefined): FeishuChatMessage {
+function renderFeishuReply(
+  body: string,
+  truncated: boolean | undefined,
+  language: ConversationLanguage
+): FeishuChatMessage {
   const normalizedBody = body.trim();
-  const suffix = truncated ? "\n\nReply truncated for Feishu delivery." : "";
+  const suffix = truncated
+    ? localize(language, {
+        en: "\n\nReply truncated for Feishu delivery.",
+        zh: "\n\n回复因飞书投递限制已被截断。"
+      })
+    : "";
   return renderFeishuTextMessage(`${normalizedBody}${suffix}`.trim());
 }
 
-function renderFeishuError(errorMessage: string): FeishuChatMessage {
+function renderFeishuError(
+  errorMessage: string,
+  language: ConversationLanguage
+): FeishuChatMessage {
   return renderFeishuTextMessage(
-    ["[Failed]", "Codex could not complete this turn.", "", trimCodeFencePayload(errorMessage)].join("\n")
+    [
+      localize(language, {
+        en: "[Failed]",
+        zh: "[失败]"
+      }),
+      localize(language, {
+        en: "Codex could not complete this turn.",
+        zh: "Codex 未能完成这次 turn。"
+      }),
+      "",
+      trimCodeFencePayload(errorMessage)
+    ].join("\n")
   );
 }
 

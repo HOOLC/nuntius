@@ -1,9 +1,15 @@
 import process from "node:process";
 import readline from "node:readline";
 
+import { localize } from "./conversation-language.js";
 import { formatCodexNetworkAccess } from "./codex-network-access.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
-import type { ConversationBinding, InboundTurn, OutboundMessage } from "./domain.js";
+import type {
+  ConversationBinding,
+  ConversationLanguage,
+  InboundTurn,
+  OutboundMessage
+} from "./domain.js";
 import { CodexBridgeService, type ConversationStatus, type TurnPublisher } from "./service.js";
 
 interface LocalChatState {
@@ -208,14 +214,20 @@ function printConversationStatus(status: ConversationStatus): void {
 }
 
 class ConsolePublisher implements TurnPublisher {
-  async publishQueued(): Promise<void> {
-    console.log("[queued] queued behind the active turn for this thread");
+  async publishQueued(_: InboundTurn, language: ConversationLanguage): Promise<void> {
+    console.log(
+      `[queued] ${localize(language, {
+        en: "queued behind the active turn for this thread",
+        zh: "当前线程已有进行中的 turn，本条消息已进入队列"
+      })}`
+    );
   }
 
   async publishStarted(
     _: InboundTurn,
     binding: ConversationBinding,
-    note?: string
+    note: string | undefined,
+    _language: ConversationLanguage
   ): Promise<void> {
     const repositoryId = binding.activeRepository?.repositoryId ?? "none";
     const workerSessionId = binding.activeRepository?.workerSessionId ?? "new";
@@ -228,19 +240,35 @@ class ConsolePublisher implements TurnPublisher {
     );
   }
 
-  async publishProgress(_: InboundTurn, message: string): Promise<void> {
+  async publishProgress(
+    _: InboundTurn,
+    message: string,
+    _language: ConversationLanguage
+  ): Promise<void> {
     console.log(`[progress] ${message}`);
   }
 
-  async publishCompleted(_: InboundTurn, message: OutboundMessage): Promise<void> {
+  async publishCompleted(
+    _: InboundTurn,
+    message: OutboundMessage,
+    _language: ConversationLanguage
+  ): Promise<void> {
     console.log(`[codex]\n${message.text}`);
   }
 
-  async publishInterrupted(_: InboundTurn, message: string): Promise<void> {
+  async publishInterrupted(
+    _: InboundTurn,
+    message: string,
+    _language: ConversationLanguage
+  ): Promise<void> {
     console.log(`[interrupted]\n${message}`);
   }
 
-  async publishFailed(_: InboundTurn, errorMessage: string): Promise<void> {
+  async publishFailed(
+    _: InboundTurn,
+    errorMessage: string,
+    _language: ConversationLanguage
+  ): Promise<void> {
     console.log(`[error]\n${errorMessage}`);
   }
 }

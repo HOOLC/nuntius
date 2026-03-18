@@ -3,13 +3,14 @@ default_repository_id = "nuntius"
 [[repository_targets]]
 id = "nuntius"
 path = "/srv/repos/nuntius"
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
 allow_channels = ["discord:123456789012345678:234567890123456789"]
 
 # Codex network access is enabled by default for worker sessions.
 # nuntius explicitly requests web access by launching worker turns with
 # `codex --search`. For `workspace-write` workers it also enables outbound
-# shell network access with `-c sandbox_workspace_write.network_access=true`.
+# shell network access with `-c sandbox_workspace_write.network_access=true`,
+# but `danger-full-access` workers do not need that extra sandbox override.
 # It derives a dedicated artifacts workspace under
 # `/tmp/nuntius-codex-network/<repo-id>` when no path is configured here.
 # Host-level network policy must still allow outbound access:

@@ -8,10 +8,16 @@ import {
   type SupervisorToWorkerMessage,
   type WorkerToSupervisorMessage
 } from "./discord-supervisor-protocol.js";
+import {
+  isProcessGuardActive,
+  PROCESS_RESTART_EXIT_CODE,
+  runModuleWithRestartGuard
+} from "./process-guard.js";
 
 const WORKER_BOOT_TIMEOUT_MS = 30_000;
 const WORKER_SHUTDOWN_TIMEOUT_MS = 10_000;
 const WORKER_RESPAWN_DELAY_MS = 1_000;
+const DISCORD_MODULE_PATH = fileURLToPath(import.meta.url);
 
 class DiscordBotSupervisor {
   private readonly workerModulePath = fileURLToPath(new URL("./discord-bot-worker.js", import.meta.url));
@@ -157,7 +163,7 @@ class DiscordBotSupervisor {
         return;
       case "request_restart":
         console.log("Supervisor exit requested by Discord admin command.");
-        void this.shutdownAndExit(75);
+        void this.shutdownAndExit(PROCESS_RESTART_EXIT_CODE);
         return;
     }
   }
@@ -303,9 +309,21 @@ class DiscordBotSupervisor {
   }
 }
 
-async function main(): Promise<void> {
+async function runDiscordProcess(): Promise<void> {
   const supervisor = new DiscordBotSupervisor();
   await supervisor.start();
+}
+
+async function main(): Promise<void> {
+  if (!isProcessGuardActive()) {
+    await runModuleWithRestartGuard({
+      label: "Discord bot",
+      modulePath: DISCORD_MODULE_PATH
+    });
+    return;
+  }
+
+  await runDiscordProcess();
 }
 
 main().catch((error) => {

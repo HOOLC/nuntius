@@ -6,17 +6,28 @@ import {
   type ServerResponse
 } from "node:http";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SlackAdapter, type SlackEnvelope } from "./adapters/slack.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
+import {
+  detectConversationLanguage,
+  localize,
+  resolveConversationLanguage
+} from "./conversation-language.js";
 import type { BridgeCommand } from "./interaction-router.js";
 import { parseBridgeCommand } from "./interaction-router.js";
+import {
+  isProcessGuardActive,
+  PROCESS_RESTART_EXIT_CODE,
+  runModuleWithRestartGuard
+} from "./process-guard.js";
 import { loadSlackBotConfig, type SlackBotConfig } from "./slack-config.js";
 import type { Attachment, ProcessingStatus } from "./domain.js";
 
 const SIGNATURE_MAX_AGE_SECONDS = 60 * 5;
 const EVENT_DEDUP_TTL_MS = 10 * 60_000;
+const SLACK_MODULE_PATH = fileURLToPath(import.meta.url);
 
 interface SlackSlashCommandPayload {
   command: string;
@@ -257,6 +268,9 @@ export class SlackBot {
   }
 
   private async handleCodexSlashCommand(payload: SlackSlashCommandPayload): Promise<void> {
+    const commandLanguage = resolveConversationLanguage({
+      text: payload.text
+    });
     if (!this.isAllowedUser(payload.user_id)) {
       await this.replyToResponseUrl(
         payload.response_url,
@@ -299,7 +313,7 @@ export class SlackBot {
       if (payload.response_url) {
         await this.replyToResponseUrl(
           payload.response_url,
-          buildSlashCompletionMessage(command, target)
+          buildSlashCompletionMessage(command, target, commandLanguage)
         );
       }
     } catch (error) {
@@ -394,10 +408,12 @@ export class SlackBot {
 
           await this.replyToResponseUrl(
             payload.response_url,
-            "Restart requested. The process will exit now; an external supervisor must start it again."
+            isProcessGuardActive()
+              ? "Restart requested. The process will exit now and the bundled guard will start a fresh process."
+              : "Restart requested. The process will exit now; an external supervisor must start it again."
           );
           setTimeout(() => {
-            process.exit(75);
+            process.exit(PROCESS_RESTART_EXIT_CODE);
           }, 250);
           return;
         default:
@@ -497,9 +513,19 @@ export class SlackBot {
     }
 
     const prompt = mentionedBot ? this.stripBotMention(text) : text.trim();
+    const language = resolveConversationLanguage({
+      binding: status.binding,
+      text: prompt || text
+    });
     const attachments = mapSlackAttachments(event.files);
     if (!prompt && attachments.length === 0) {
-      await this.postConversationFailure(target, "Reply with a message for Codex or use `/codex help`.");
+      await this.postConversationFailure(
+        target,
+        localize(language, {
+          en: "Reply with a message for Codex or use `/codex help`.",
+          zh: "请回复一条发给 Codex 的消息，或使用 `/codex help`。"
+        })
+      );
       return;
     }
 
@@ -527,6 +553,9 @@ export class SlackBot {
     }
 
     const prompt = this.stripBotMention(text);
+    const language = resolveConversationLanguage({
+      text: prompt || text
+    });
     const attachments = mapSlackAttachments(event.files);
     const target: SlackConversationTarget = {
       workspaceId,
@@ -538,7 +567,10 @@ export class SlackBot {
     if (!prompt && attachments.length === 0) {
       await this.postConversationFailure(
         target,
-        "Mention me with a prompt, or use `/codex help` in the thread after I reply."
+        localize(language, {
+          en: "Mention me with a prompt, or use `/codex help` in the thread after I reply.",
+          zh: "请在提及时附上你的请求，或等我回复后在该线程里使用 `/codex help`。"
+        })
       );
       return;
     }
@@ -572,7 +604,10 @@ export class SlackBot {
 
     const starter = await this.slackApi.postMessage({
       channel: payload.channel_id,
-      text: `Codex thread for <@${payload.user_id}>`
+      text: buildSlackThreadStarterMessage(
+        payload.user_id,
+        detectConversationLanguage(payload.text)
+      )
     });
 
     if (!starter.ts) {
@@ -1085,13 +1120,37 @@ function buildSlackAdminHelp(): string {
 
 function buildSlashCompletionMessage(
   command: BridgeCommand,
-  target: SlackConversationTarget
+  target: SlackConversationTarget,
+  language: "en" | "zh"
 ): string {
   if (command.kind === "bind") {
-    return target.scope === "thread" ? "Bound in this thread." : "Bound in this DM.";
+    return target.scope === "thread"
+      ? localize(language, {
+          en: "Bound in this thread.",
+          zh: "已在此线程中绑定。"
+        })
+      : localize(language, {
+          en: "Bound in this DM.",
+          zh: "已在此私聊中绑定。"
+        });
   }
 
-  return target.scope === "thread" ? "Continuing in this thread." : "Continuing in this DM.";
+  return target.scope === "thread"
+    ? localize(language, {
+        en: "Continuing in this thread.",
+        zh: "将在此线程中继续。"
+      })
+    : localize(language, {
+        en: "Continuing in this DM.",
+        zh: "将在此私聊中继续。"
+      });
+}
+
+function buildSlackThreadStarterMessage(userId: string, language: "en" | "zh"): string {
+  return localize(language, {
+    en: `Codex thread for <@${userId}>`,
+    zh: `<@${userId}> 的 Codex 线程`
+  });
 }
 
 function formatTopLevelError(error: unknown): string {
@@ -1133,6 +1192,14 @@ function formatSessionReconciliationLines(result: {
 }
 
 export async function main(): Promise<void> {
+  if (!isProcessGuardActive()) {
+    await runModuleWithRestartGuard({
+      label: "Slack bot",
+      modulePath: SLACK_MODULE_PATH
+    });
+    return;
+  }
+
   const bot = new SlackBot();
   await bot.start();
 }

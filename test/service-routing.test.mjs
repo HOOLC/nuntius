@@ -292,8 +292,9 @@ test("reconcileSessionBindings reloads persisted handler and worker settings fro
   assert.equal(status.binding?.handlerSessionId, undefined);
   assert.deepEqual(status.binding?.handlerConfig, {
     workspacePath: handlerDirB,
-    sandboxMode: "read-only",
-    model: "handler-model-b"
+    sandboxMode: "danger-full-access",
+    model: "handler-model-b",
+    sessionConfigVersion: 1
   });
   assert.equal(status.binding?.activeRepository?.repositoryPath, repoDirB);
   assert.equal(status.binding?.activeRepository?.model, "repo-model-b");
@@ -379,8 +380,137 @@ test("stale handler sessions are not resumed after handler config changes", asyn
   assert.equal(status.binding?.handlerSessionId, "handler-session-2");
   assert.deepEqual(status.binding?.handlerConfig, {
     workspacePath: handlerDirB,
-    sandboxMode: "read-only",
-    model: "handler-model-b"
+    sandboxMode: "danger-full-access",
+    model: "handler-model-b",
+    sessionConfigVersion: 1
+  });
+});
+
+test("system replies stay in Chinese after a conversation starts in Chinese", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-language-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        return {
+          sessionId: request.sessionId ?? "handler-session-zh",
+          responseText: JSON.stringify({
+            action: "reply",
+            message: "已收到。"
+          }),
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+  const router = new InteractionRouter(service);
+
+  const conversationPublisher = createPublisher();
+  await router.handleTurn(buildTurn("你好，先聊一下"), conversationPublisher);
+  assert.deepEqual(conversationPublisher.completed, ["已收到。"]);
+
+  const statusPublisher = createPublisher();
+  await router.handleTurn(buildTurn("/codex status"), statusPublisher);
+  assert.equal(statusPublisher.completed.length, 1);
+  assert.match(statusPublisher.completed[0], /会话状态：/);
+  assert.match(statusPublisher.completed[0], /可用仓库：repo/);
+  assert.doesNotMatch(statusPublisher.completed[0], /Conversation status:/);
+
+  const status = await service.getConversationStatus(buildTurn("继续"));
+  assert.equal(status.binding?.language, "zh");
+});
+
+test("unbound handler turns replace legacy sessions and launch with full access", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-handler-sandbox-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const calls = [];
+  const sessionStore = new FileSessionStore(path.join(root, "sessions.json"));
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    sessionStore,
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+        return {
+          sessionId: request.sessionId ?? "handler-session-upgraded",
+          responseText: JSON.stringify({
+            action: "reply",
+            message: "Handler has full access."
+          }),
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("check permissions");
+  await sessionStore.upsert({
+    key: {
+      platform: turn.platform,
+      workspaceId: turn.workspaceId,
+      channelId: turn.channelId,
+      threadId: turn.threadId
+    },
+    createdByUserId: turn.userId,
+    createdAt: "2026-03-16T00:00:00.000Z",
+    updatedAt: "2026-03-16T00:00:00.000Z",
+    handlerSessionId: "handler-session-legacy",
+    handlerConfig: {
+      workspacePath: handlerDir,
+      sandboxMode: "danger-full-access"
+    }
+  });
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].sessionId, undefined);
+  assert.equal(calls[0].repositoryPath, handlerDir);
+  assert.equal(calls[0].sandboxMode, "danger-full-access");
+  assert.deepEqual(publisher.completed, ["Handler has full access."]);
+
+  const status = await service.getConversationStatus(turn);
+  assert.equal(status.binding?.handlerSessionId, "handler-session-upgraded");
+  assert.deepEqual(status.binding?.handlerConfig, {
+    workspacePath: handlerDir,
+    sandboxMode: "danger-full-access",
+    model: undefined,
+    sessionConfigVersion: 1
   });
 });
 

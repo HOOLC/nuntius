@@ -96,7 +96,7 @@ export function createDiscordCommandPayload(): RESTPostAPIChatInputApplicationCo
       .addSubcommand((subcommand) =>
         subcommand
           .setName("restart")
-          .setDescription("Exit the process so an external supervisor can restart it")
+          .setDescription("Restart the Discord bridge process")
       )
       .toJSON()
   ];
