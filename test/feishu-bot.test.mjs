@@ -581,34 +581,153 @@ function buildMessageEvent(input) {
 }
 
 function buildFakeCodexScript(invocationLogPath) {
-  return `#!/usr/bin/env bash
-set -euo pipefail
+  return `#!/usr/bin/env node
+const { appendFileSync, existsSync } = require("node:fs");
+const readline = require("node:readline");
 
-session_id=""
-if [[ "\${2:-}" == "resume" || "\${3:-}" == "resume" ]]; then
-  session_id="\${@: -2:1}"
-  printf '%s\\n' "resume:\${session_id}" >> ${JSON.stringify(invocationLogPath)}
-else
-  printf '%s\\n' 'worker:new' >> ${JSON.stringify(invocationLogPath)}
-fi
+const rl = readline.createInterface({
+  input: process.stdin,
+  crlfDelay: Infinity
+});
 
-prompt="\${@: -1}"
-attachment_path="$(printf '%s' "\${prompt}" | grep -oE 'path=/[^[:space:]]+\\.docx?' | head -n1 | sed 's/^path=//' || true)"
-if [[ -n "\${attachment_path}" && -f "\${attachment_path}" ]]; then
-  printf '%s' 'updated by fake codex' >> "\${attachment_path}"
-fi
+let threadId = "worker-session";
+let resumed = false;
 
-if [[ -n "\${session_id}" ]]; then
-  printf '%s\\n' '{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"README.md","kind":"update"}]}}'
-  printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Worker follow-up output."}}'
-  printf '%s\\n' '{"type":"turn.completed"}'
-  exit 0
-fi
+function send(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
 
-printf '%s\\n' '{"type":"thread.started","thread_id":"worker-session"}'
-printf '%s\\n' '{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"README.md","kind":"update"}]}}'
-printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Worker summary output."}}'
-printf '%s\\n' '{"type":"turn.completed"}'
+function sendResult(id, result) {
+  send({
+    jsonrpc: "2.0",
+    id,
+    result
+  });
+}
+
+function sendNotification(method, params) {
+  send({
+    jsonrpc: "2.0",
+    method,
+    params
+  });
+}
+
+function maybeUpdateAttachment(prompt) {
+  const match = String(prompt).match(/path=(\\/[^\\s]+\\.docx?)/);
+  const attachmentPath = match?.[1];
+  if (attachmentPath && existsSync(attachmentPath)) {
+    appendFileSync(attachmentPath, "updated by fake codex");
+  }
+}
+
+(async () => {
+  for await (const line of rl) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    const message = JSON.parse(line);
+    switch (message.method) {
+      case "initialize":
+        sendResult(message.id, {
+          userAgent: "fake-codex",
+          codexHome: "/tmp/fake-codex-home",
+          platformFamily: "unix",
+          platformOs: "linux"
+        });
+        break;
+      case "notifications/initialized":
+      case "initialized":
+        break;
+      case "thread/start":
+        resumed = false;
+        appendFileSync(${JSON.stringify(invocationLogPath)}, "worker:new\\n");
+        sendResult(message.id, {
+          thread: {
+            id: threadId
+          }
+        });
+        sendNotification("thread/started", {
+          thread: {
+            id: threadId
+          }
+        });
+        break;
+      case "thread/resume":
+        resumed = true;
+        threadId = message.params.threadId;
+        appendFileSync(${JSON.stringify(invocationLogPath)}, "resume:" + threadId + "\\n");
+        sendResult(message.id, {
+          thread: {
+            id: threadId
+          }
+        });
+        break;
+      case "turn/start": {
+        const activeTurnId = resumed ? "turn-resume" : "turn-new";
+        const prompt = message.params?.input?.[0]?.text ?? "";
+        maybeUpdateAttachment(prompt);
+        sendResult(message.id, {
+          turn: {
+            id: activeTurnId,
+            items: [],
+            status: "inProgress",
+            error: null
+          }
+        });
+        sendNotification("turn/started", {
+          threadId,
+          turn: {
+            id: activeTurnId,
+            items: [],
+            status: "inProgress",
+            error: null
+          }
+        });
+        sendNotification("item/completed", {
+          threadId,
+          turnId: activeTurnId,
+          item: {
+            type: "fileChange",
+            id: resumed ? "file-resume" : "file-new",
+            changes: [
+              {
+                path: "README.md",
+                kind: "update"
+              }
+            ],
+            status: "applied"
+          }
+        });
+        sendNotification("item/completed", {
+          threadId,
+          turnId: activeTurnId,
+          item: {
+            type: "agentMessage",
+            id: resumed ? "msg-resume" : "msg-new",
+            text: resumed ? "Worker follow-up output." : "Worker summary output.",
+            phase: "final_answer",
+            memoryCitation: null
+          }
+        });
+        sendNotification("turn/completed", {
+          threadId,
+          turn: {
+            id: activeTurnId,
+            items: [],
+            status: "completed",
+            error: null
+          }
+        });
+        break;
+      }
+      default:
+        sendResult(message.id, null);
+        break;
+    }
+  }
+})();
 `;
 }
 

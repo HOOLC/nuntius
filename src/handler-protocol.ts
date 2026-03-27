@@ -3,27 +3,24 @@ import { describeConversationLanguage } from "./conversation-language.js";
 import type { RepositoryTarget } from "./config.js";
 import type { ConversationBinding, ConversationLanguage, InboundTurn } from "./domain.js";
 
-export type HandlerDecision =
-  | {
-      action: "reply";
-      message: string;
-    }
+export type HandlerControlAction =
   | {
       action: "bind_repo";
       repositoryId: string;
-      message?: string;
-      continueWithWorkerPrompt?: string;
     }
   | {
       action: "delegate";
       workerPrompt: string;
-      message?: string;
     }
   | {
       action: "reset";
       scope: "worker" | "binding" | "context" | "all";
-      message?: string;
     };
+
+export interface HandlerDecision {
+  message?: string;
+  actions: HandlerControlAction[];
+}
 
 export function buildHandlerUserPrompt(input: {
   turn: InboundTurn;
@@ -42,20 +39,28 @@ export function buildHandlerUserPrompt(input: {
   const lines = [
     "You are the handler Codex session for an IM bridge thread that is not currently routed straight to a bound worker session.",
     "You decide whether to reply directly, bind a repository, or reset state before repo-scoped work continues in the bound worker session.",
-    "Reply with exactly one JSON object and no markdown.",
+    "Normal plain-text replies are allowed.",
+    "If you need bridge control, include one or more action tags anywhere in your reply.",
     "",
-    "JSON protocol:",
-    '- {"action":"reply","message":"..."}',
-    '- {"action":"bind_repo","repositoryId":"repo-id","message":"optional","continueWithWorkerPrompt":"optional"}',
-    '- {"action":"reset","scope":"worker|binding|context|all","message":"optional"}',
+    "Action tags:",
+    "- [[ACTION:BIND(repo-id)]]",
+    "- [[ACTION:DELEGATE(worker prompt)]]",
+    "- [[ACTION:RESET(worker|binding|context|all)]]",
     "",
     "Rules:",
+    "- If no bridge control is needed, send normal text with no action tags.",
+    "- Action tags are stripped before the visible reply is sent to the user.",
+    "- Multiple action tags are allowed. If immediate repo work is needed, emit BIND before DELEGATE.",
     "- One thread may have at most one active repository binding at a time.",
     "- Do not silently switch repositories.",
-    "- Repository switching stays explicit: use bind_repo before any work should move to a different repository.",
+    "- Repository switching stays explicit: use BIND before any work should move to a different repository.",
     "- Once a repository is bound, later plain-text thread replies bypass you and go straight to that worker session.",
     "- If no repository is bound and the user asks for repo work, ask which repository to use unless it is already explicit.",
-    "- Use bind_repo with continueWithWorkerPrompt when the user explicitly names a repository and also wants immediate repo work.",
+    '- Treat conversational control phrases like "work on <repo-id>", "switch to <repo-id>", or "bind this thread to <repo-id>" as explicit repository-binding requests.',
+    '- When the user says "work on <repo-id>" without a concrete task, emit [[ACTION:BIND(repo-id)]] and keep the visible reply short. Do not invent repo work.',
+    '- When the user explicitly names a repository and also wants immediate repo work, emit [[ACTION:BIND(repo-id)]] followed by [[ACTION:DELEGATE(worker prompt)]].',
+    '- For conversational requests like "what repo is this bound to?", "what repos are available?", or "how do I use this?", answer with reply using the current state below instead of asking for more detail.',
+    '- For conversational reset requests like "reset this thread", "clear context", or "start over", emit RESET with the closest matching scope.',
     "- Use reply for clarification, conversational answers, repo questions, and status-style answers.",
     `- Reply to the user in ${describeConversationLanguage(conversationLanguage)}.`,
     `- Explicit repository selection required: ${String(requireExplicitRepositorySelection)}.`,
@@ -83,38 +88,97 @@ export function buildHandlerUserPrompt(input: {
 }
 
 export function parseHandlerDecision(rawText: string): HandlerDecision {
-  const parsed = JSON.parse(extractJsonObject(rawText)) as unknown;
-  if (!isRecord(parsed) || typeof parsed.action !== "string") {
-    throw new Error("Handler response did not contain a valid action.");
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    throw new Error("Handler response was empty.");
   }
 
-  switch (parsed.action) {
-    case "reply":
-      return {
-        action: "reply",
-        message: readRequiredString(parsed, "message")
-      };
-    case "bind_repo":
-      return {
-        action: "bind_repo",
-        repositoryId: readRequiredString(parsed, "repositoryId"),
-        message: readOptionalString(parsed, "message"),
-        continueWithWorkerPrompt: readOptionalString(parsed, "continueWithWorkerPrompt")
-      };
-    case "delegate":
-      return {
-        action: "delegate",
-        workerPrompt: readRequiredString(parsed, "workerPrompt"),
-        message: readOptionalString(parsed, "message")
-      };
-    case "reset":
-      return {
-        action: "reset",
-        scope: readResetScope(parsed.scope),
-        message: readOptionalString(parsed, "message")
-      };
-    default:
-      throw new Error(`Unsupported handler action: ${parsed.action}.`);
+  if (trimmed.includes("[[ACTION:")) {
+    return parseTaggedHandlerDecision(rawText);
+  }
+
+  const legacyDecision = parseLegacyHandlerDecision(rawText);
+  if (legacyDecision) {
+    return legacyDecision;
+  }
+
+  return {
+    message: trimmed,
+    actions: []
+  };
+}
+
+function parseTaggedHandlerDecision(rawText: string): HandlerDecision {
+  const taggedActions = scanTaggedActions(rawText);
+  const message = stripTaggedActions(rawText, taggedActions);
+  return {
+    message: message || undefined,
+    actions: taggedActions.map((taggedAction) => taggedAction.action)
+  };
+}
+
+function parseLegacyHandlerDecision(rawText: string): HandlerDecision | undefined {
+  const trimmed = rawText.trim();
+  if (!looksLikeLegacyJson(trimmed)) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(extractJsonObject(rawText)) as unknown;
+    if (!isRecord(parsed) || typeof parsed.action !== "string") {
+      return undefined;
+    }
+
+    switch (parsed.action) {
+      case "reply":
+        return {
+          message: readRequiredString(parsed, "message"),
+          actions: []
+        };
+      case "bind_repo": {
+        const actions: HandlerControlAction[] = [
+          {
+            action: "bind_repo",
+            repositoryId: readRequiredString(parsed, "repositoryId")
+          }
+        ];
+        const continueWithWorkerPrompt = readOptionalString(parsed, "continueWithWorkerPrompt");
+        if (continueWithWorkerPrompt) {
+          actions.push({
+            action: "delegate",
+            workerPrompt: continueWithWorkerPrompt
+          });
+        }
+        return {
+          message: readOptionalString(parsed, "message"),
+          actions
+        };
+      }
+      case "delegate":
+        return {
+          message: readOptionalString(parsed, "message"),
+          actions: [
+            {
+              action: "delegate",
+              workerPrompt: readRequiredString(parsed, "workerPrompt")
+            }
+          ]
+        };
+      case "reset":
+        return {
+          message: readOptionalString(parsed, "message"),
+          actions: [
+            {
+              action: "reset",
+              scope: readResetScope(parsed.scope)
+            }
+          ]
+        };
+      default:
+        return undefined;
+    }
+  } catch {
+    return undefined;
   }
 }
 
@@ -136,6 +200,106 @@ function extractJsonObject(rawText: string): string {
   }
 
   throw new Error("Handler response did not contain a JSON object.");
+}
+
+function looksLikeLegacyJson(trimmed: string): boolean {
+  return trimmed.startsWith("{") || /^```(?:json)?\s*/i.test(trimmed);
+}
+
+interface TaggedHandlerAction {
+  start: number;
+  end: number;
+  action: HandlerControlAction;
+}
+
+function scanTaggedActions(rawText: string): TaggedHandlerAction[] {
+  const actions: TaggedHandlerAction[] = [];
+  let cursor = 0;
+
+  while (cursor < rawText.length) {
+    const start = rawText.indexOf("[[ACTION:", cursor);
+    if (start < 0) {
+      break;
+    }
+
+    const actionNameStart = start + "[[ACTION:".length;
+    const openParen = rawText.indexOf("(", actionNameStart);
+    if (openParen < 0) {
+      throw new Error("Malformed handler action tag.");
+    }
+
+    const actionName = rawText.slice(actionNameStart, openParen).trim().toUpperCase();
+    let depth = 1;
+    let index = openParen + 1;
+
+    while (index < rawText.length && depth > 0) {
+      const character = rawText[index];
+      if (character === "(") {
+        depth += 1;
+      } else if (character === ")") {
+        depth -= 1;
+      }
+      index += 1;
+    }
+
+    if (depth !== 0 || rawText.slice(index, index + 2) !== "]]") {
+      throw new Error("Malformed handler action tag.");
+    }
+
+    const payload = rawText.slice(openParen + 1, index - 1).trim();
+    actions.push({
+      start,
+      end: index + 2,
+      action: parseTaggedAction(actionName, payload)
+    });
+    cursor = index + 2;
+  }
+
+  return actions;
+}
+
+function stripTaggedActions(rawText: string, actions: TaggedHandlerAction[]): string {
+  if (actions.length === 0) {
+    return rawText.trim();
+  }
+
+  let cursor = 0;
+  const segments: string[] = [];
+  for (const action of actions) {
+    segments.push(rawText.slice(cursor, action.start));
+    cursor = action.end;
+  }
+  segments.push(rawText.slice(cursor));
+
+  return segments.join("").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function parseTaggedAction(actionName: string, payload: string): HandlerControlAction {
+  switch (actionName) {
+    case "BIND":
+      if (!payload) {
+        throw new Error("BIND action requires a repository id.");
+      }
+      return {
+        action: "bind_repo",
+        repositoryId: payload
+      };
+    case "DELEGATE":
+      if (!payload) {
+        throw new Error("DELEGATE action requires a worker prompt.");
+      }
+      return {
+        action: "delegate",
+        workerPrompt: payload
+      };
+    case "RESET":
+      return {
+        action: "reset",
+        scope: readResetScope(payload)
+      };
+    default:
+      throw new Error(`Unsupported handler action tag: ${actionName}.`);
+  }
 }
 
 function formatRepositoryList(repositories: RepositoryTarget[]): string {

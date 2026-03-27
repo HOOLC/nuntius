@@ -22,12 +22,13 @@ The handler is only needed while the thread is still unbound. After binding, the
 
 ## Codex Surfaces
 
-This design uses the locally available Codex CLI:
+This design uses the locally available Codex app server over stdio:
 
-- `codex exec --json`
-- `codex exec resume --json`
+- `codex app-server`
+- `thread/start` and `thread/resume`
+- `turn/start` and `turn/interrupt`
 
-That is enough for both optional handler sessions and persistent worker sessions.
+That is enough for both optional handler sessions and persistent worker sessions while keeping the bridge in control of interrupts and approval callbacks.
 
 ## Core Model
 

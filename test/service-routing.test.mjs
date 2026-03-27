@@ -493,6 +493,158 @@ test("system replies stay in Chinese after a conversation starts in Chinese", as
   assert.equal(status.binding?.language, "zh");
 });
 
+test("handler plain-text replies are delivered directly without a JSON envelope", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-handler-plain-text-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn() {
+        return {
+          sessionId: "handler-session-plain-text",
+          responseText: "Normal handler text reply.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const publisher = createPublisher();
+  await service.handleTurn(buildTurn("just answer normally"), publisher);
+
+  assert.deepEqual(publisher.completed, ["Normal handler text reply."]);
+});
+
+test("handler can bind a repo from natural language without local parser help", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-handler-bind-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        if (request.repositoryPath !== handlerDir) {
+          throw new Error("worker should not run for a bind-only handler decision");
+        }
+
+        return {
+          sessionId: request.sessionId ?? "handler-session-bind",
+          responseText: '[[ACTION:BIND(repo)]]\nBound this conversation to "repo" via handler.',
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+  const router = new InteractionRouter(service);
+
+  const publisher = createPublisher();
+  await router.handleTurn(buildTurn("work on repo"), publisher);
+
+  assert.equal(publisher.failed.length, 0);
+  assert.deepEqual(publisher.completed, ['Bound this conversation to "repo" via handler.']);
+
+  const status = await service.getConversationStatus(buildTurn("status"));
+  assert.equal(status.binding?.activeRepository?.repositoryId, "repo");
+  assert.equal(status.binding?.handlerSessionId, "handler-session-bind");
+});
+
+test("handler action tags can bind and delegate in the same reply", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-handler-bind-delegate-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const calls = [];
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+
+        if (request.repositoryPath === handlerDir) {
+          return {
+            sessionId: "handler-session-bind-delegate",
+            responseText: [
+              "[[ACTION:BIND(repo)]]",
+              "[[ACTION:DELEGATE(Inspect the repo now.)]]",
+              "Binding and handing off."
+            ].join("\n"),
+            rawEvents: [],
+            stderrLines: []
+          };
+        }
+
+        return {
+          sessionId: "worker-session-bind-delegate",
+          responseText: "Worker summary output.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+  const router = new InteractionRouter(service);
+
+  const publisher = createPublisher();
+  await router.handleTurn(buildTurn("work on repo and inspect it"), publisher);
+
+  assert.deepEqual(publisher.started, [
+    {
+      repositoryId: "repo",
+      note: "Binding and handing off."
+    }
+  ]);
+  assert.deepEqual(publisher.completed, ["Worker summary output."]);
+  assert.equal(calls[0].repositoryPath, handlerDir);
+  assert.equal(calls[1].repositoryPath, repoDir);
+});
+
 test("unbound handler turns replace legacy sessions and honor the configured sandbox", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-handler-sandbox-"));
   t.after(() => {

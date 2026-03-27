@@ -45,7 +45,7 @@ test("network access start notes describe the remaining host prerequisites", () 
   assert.match(note, /resolve\/connect to external hosts/);
 });
 
-test("CodexRunner prefixes new and resumed worker sessions with --search and workspace-write network access when requested", async (t) => {
+test("CodexRunner launches the app server with network-aware worker settings for new and resumed sessions", async (t) => {
   const harness = createRunnerHarness();
   t.after(() => harness.cleanup());
 
@@ -78,37 +78,57 @@ test("CodexRunner prefixes new and resumed worker sessions with --search and wor
   const invocations = readArgInvocations(harness.paths.argLogPath);
   assert.deepEqual(invocations[0], [
     "--search",
-    "exec",
-    "--json",
-    "--skip-git-repo-check",
-    "-C",
-    harness.paths.repoDir,
+    "app-server",
     "-c",
     'foo="bar"',
     "-c",
     'approval_policy="never"',
     "-c",
-    "sandbox_workspace_write.network_access=true",
-    "--add-dir",
-    harness.paths.networkDir,
-    "-s",
-    "workspace-write",
-    "inspect repo"
+    "sandbox_workspace_write.network_access=true"
   ]);
   assert.deepEqual(invocations[1], [
     "--search",
-    "exec",
-    "resume",
-    "--json",
-    "--skip-git-repo-check",
+    "app-server",
     "-c",
     'foo="bar"',
     "-c",
     'approval_policy="never"',
     "-c",
-    "sandbox_workspace_write.network_access=true",
-    "worker-session",
-    "follow up"
+    "sandbox_workspace_write.network_access=true"
+  ]);
+
+  const requests = readRequestLog(harness.paths.requestLogPath).filter(
+    (message) => message.method !== "notifications/initialized" && message.method !== "initialized"
+  );
+  assert.equal(requests[0].method, "initialize");
+  assert.equal(requests[1].method, "thread/start");
+  assert.equal(requests[1].params.cwd, harness.paths.repoDir);
+  assert.equal(requests[1].params.sandbox, "workspace-write");
+  assert.equal(requests[1].params.approvalPolicy, "never");
+  assert.equal(requests[2].method, "turn/start");
+  assert.equal(requests[2].params.threadId, "worker-session");
+  assert.equal(requests[2].params.input[0].text, "inspect repo");
+  assert.deepEqual(requests[2].params.sandboxPolicy, {
+    type: "workspaceWrite",
+    writableRoots: [harness.paths.repoDir, harness.paths.networkDir],
+    readOnlyAccess: {
+      type: "fullAccess"
+    },
+    networkAccess: true,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false
+  });
+  assert.equal(requests[3].method, "initialize");
+  assert.equal(requests[4].method, "thread/resume");
+  assert.equal(requests[4].params.threadId, "worker-session");
+  assert.equal(requests[4].params.cwd, harness.paths.repoDir);
+  assert.equal(requests[4].params.sandbox, "workspace-write");
+  assert.equal(requests[5].method, "turn/start");
+  assert.equal(requests[5].params.threadId, "worker-session");
+  assert.equal(requests[5].params.input[0].text, "follow up");
+  assert.deepEqual(requests[5].params.sandboxPolicy.writableRoots, [
+    harness.paths.repoDir,
+    harness.paths.networkDir
   ]);
 });
 
@@ -324,12 +344,13 @@ function createRunnerHarness() {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-codex-runner-"));
   const repoDir = path.join(root, "repo");
   const networkDir = path.join(root, "network");
-  const argLogPath = path.join(root, "argv.bin");
+  const argLogPath = path.join(root, "argv.jsonl");
+  const requestLogPath = path.join(root, "requests.jsonl");
   const fakeCodexPath = path.join(root, "fake-codex");
 
   mkdirSync(repoDir, { recursive: true });
   mkdirSync(networkDir, { recursive: true });
-  writeFileSync(fakeCodexPath, buildFakeCodexScript(argLogPath), { mode: 0o755 });
+  writeFileSync(fakeCodexPath, buildFakeCodexScript(argLogPath, requestLogPath), { mode: 0o755 });
   chmodSync(fakeCodexPath, 0o755);
 
   return {
@@ -338,6 +359,7 @@ function createRunnerHarness() {
       repoDir,
       networkDir,
       argLogPath,
+      requestLogPath,
       fakeCodexPath
     },
     cleanup() {
@@ -346,33 +368,147 @@ function createRunnerHarness() {
   };
 }
 
-function buildFakeCodexScript(argLogPath) {
-  return `#!/usr/bin/env bash
-set -euo pipefail
+function buildFakeCodexScript(argLogPath, requestLogPath) {
+  return `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const readline = require("node:readline");
 
-for arg in "$@"; do
-  printf '%s\\0' "$arg" >> ${JSON.stringify(argLogPath)}
-done
-printf '\\0' >> ${JSON.stringify(argLogPath)}
+appendFileSync(${JSON.stringify(argLogPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");
 
-if [[ "\${2:-}" == "resume" ]]; then
-  printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"resume ok"}}'
-  printf '%s\\n' '{"type":"turn.completed"}'
-  exit 0
-fi
+const rl = readline.createInterface({
+  input: process.stdin,
+  crlfDelay: Infinity
+});
 
-printf '%s\\n' '{"type":"thread.started","thread_id":"worker-session"}'
-printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"new ok"}}'
-printf '%s\\n' '{"type":"turn.completed"}'
+let threadId = "worker-session";
+let resumed = false;
+
+function send(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
+
+function sendResult(id, result) {
+  send({
+    jsonrpc: "2.0",
+    id,
+    result
+  });
+}
+
+function sendNotification(method, params) {
+  send({
+    jsonrpc: "2.0",
+    method,
+    params
+  });
+}
+
+(async () => {
+  for await (const line of rl) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    const message = JSON.parse(line);
+    appendFileSync(${JSON.stringify(requestLogPath)}, JSON.stringify(message) + "\\n");
+
+    switch (message.method) {
+      case "initialize":
+        sendResult(message.id, {
+          userAgent: "fake-codex",
+          codexHome: "/tmp/fake-codex-home",
+          platformFamily: "unix",
+          platformOs: "linux"
+        });
+        break;
+      case "notifications/initialized":
+      case "initialized":
+        break;
+      case "thread/start":
+        resumed = false;
+        sendResult(message.id, {
+          thread: {
+            id: threadId
+          }
+        });
+        sendNotification("thread/started", {
+          thread: {
+            id: threadId
+          }
+        });
+        break;
+      case "thread/resume":
+        resumed = true;
+        threadId = message.params.threadId;
+        sendResult(message.id, {
+          thread: {
+            id: threadId
+          }
+        });
+        break;
+      case "turn/start": {
+        sendResult(message.id, {
+          turn: {
+            id: resumed ? "turn-resume" : "turn-new",
+            items: [],
+            status: "inProgress",
+            error: null
+          }
+        });
+        sendNotification("turn/started", {
+          threadId,
+          turn: {
+            id: resumed ? "turn-resume" : "turn-new",
+            items: [],
+            status: "inProgress",
+            error: null
+          }
+        });
+        sendNotification("item/completed", {
+          threadId,
+          turnId: resumed ? "turn-resume" : "turn-new",
+          item: {
+            type: "agentMessage",
+            id: resumed ? "msg-resume" : "msg-new",
+            text: resumed ? "resume ok" : "new ok",
+            phase: "final_answer",
+            memoryCitation: null
+          }
+        });
+        sendNotification("turn/completed", {
+          threadId,
+          turn: {
+            id: resumed ? "turn-resume" : "turn-new",
+            items: [],
+            status: "completed",
+            error: null
+          }
+        });
+        break;
+      }
+      default:
+        sendResult(message.id, null);
+        break;
+    }
+  }
+})();
 `;
 }
 
 function readArgInvocations(filePath) {
-  const content = readFileSync(filePath, "utf8");
-  return content
-    .split("\u0000\u0000")
+  return readJsonLines(filePath);
+}
+
+function readRequestLog(filePath) {
+  return readJsonLines(filePath);
+}
+
+function readJsonLines(filePath) {
+  return readFileSync(filePath, "utf8")
+    .trim()
+    .split("\n")
     .filter(Boolean)
-    .map((entry) => entry.split("\u0000").filter(Boolean));
+    .map((line) => JSON.parse(line));
 }
 
 function buildTurn() {

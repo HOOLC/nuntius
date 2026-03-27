@@ -388,88 +388,94 @@ export class CodexBridgeService {
     publisher: TurnPublisher
   ): Promise<{ binding: ConversationBinding; finalMessage?: OutboundMessage }> {
     const language = binding.language ?? resolveConversationLanguage({ text: turn.text });
+    let nextBinding = binding;
+    let lastAction: HandlerDecision["actions"][number] | undefined;
 
-    switch (decision.action) {
-      case "reply":
-        return {
-          binding: touchBinding(binding),
-          finalMessage: clipMessage(decision.message, this.config.maxResponseChars, undefined, language)
-        };
-      case "bind_repo": {
-        const repository = this.resolveRepository(turn, decision.repositoryId);
-        let nextBinding = bindRepository(binding, repository, turn.userId);
+    for (const action of decision.actions) {
+      lastAction = action;
 
-        if (!decision.continueWithWorkerPrompt) {
+      switch (action.action) {
+        case "bind_repo": {
+          const repository = this.resolveRepository(turn, action.repositoryId);
+          nextBinding = bindRepository(nextBinding, repository, turn.userId);
+          break;
+        }
+        case "delegate": {
+          if (!nextBinding.activeRepository) {
+            return {
+              binding: touchBinding(nextBinding),
+              finalMessage: clipMessage(
+                this.buildMissingRepositoryMessage(turn, language),
+                this.config.maxResponseChars,
+                undefined,
+                language
+              )
+            };
+          }
+
+          return this.completeWorkerTurn(
+            turn,
+            nextBinding,
+            action.workerPrompt,
+            publisher,
+            decision.message
+          );
+        }
+        case "reset":
+          return {
+            binding: resetBinding(nextBinding, action.scope),
+            finalMessage: clipMessage(
+              decision.message ?? buildResetMessage(action.scope, language),
+              this.config.maxResponseChars,
+              undefined,
+              language
+            )
+          };
+        default:
           return {
             binding: nextBinding,
             finalMessage: clipMessage(
-              decision.message ??
-                localize(language, {
-                  en: `This thread is now bound to repository "${repository.id}".`,
-                  zh: `当前线程已绑定到仓库 "${repository.id}"。`
-                }),
+              localize(language, {
+                en: "Unsupported handler decision.",
+                zh: "不支持的 handler 决策。"
+              }),
               this.config.maxResponseChars,
               undefined,
               language
             )
           };
-        }
-
-        return this.completeWorkerTurn(
-          turn,
-          nextBinding,
-          decision.continueWithWorkerPrompt,
-          publisher,
-          decision.message
-        );
       }
-      case "delegate": {
-        if (!binding.activeRepository) {
-          return {
-            binding: touchBinding(binding),
-            finalMessage: clipMessage(
-              this.buildMissingRepositoryMessage(turn, language),
-              this.config.maxResponseChars,
-              undefined,
-              language
-            )
-          };
-        }
-
-        // Keep accepting legacy delegate decisions from existing handler sessions, but route
-        // the user-facing reply straight from the worker output.
-        return this.completeWorkerTurn(
-          turn,
-          binding,
-          decision.workerPrompt,
-          publisher,
-          decision.message
-        );
-      }
-      case "reset":
-        return {
-          binding: resetBinding(binding, decision.scope),
-          finalMessage: clipMessage(
-            decision.message ?? buildResetMessage(decision.scope, language),
-            this.config.maxResponseChars,
-            undefined,
-            language
-          )
-        };
-      default:
-        return {
-          binding,
-          finalMessage: clipMessage(
-            localize(language, {
-              en: "Unsupported handler decision.",
-              zh: "不支持的 handler 决策。"
-            }),
-            this.config.maxResponseChars,
-            undefined,
-            language
-          )
-        };
     }
+
+    if (!lastAction) {
+      return {
+        binding: touchBinding(nextBinding),
+        finalMessage: clipMessage(
+          decision.message ??
+            localize(language, {
+              en: "Handler returned an empty response.",
+              zh: "Handler 返回了空响应。"
+            }),
+          this.config.maxResponseChars,
+          undefined,
+          language
+        )
+      };
+    }
+
+    return {
+      binding: nextBinding,
+      finalMessage: clipMessage(
+        decision.message ??
+          localize(language, {
+            en: `This thread is now bound to repository "${nextBinding.activeRepository?.repositoryId ?? "unknown"}".`,
+            zh: `当前线程已绑定到仓库 "${nextBinding.activeRepository?.repositoryId ?? "unknown"}"。`
+          }),
+        this.config.maxResponseChars,
+        undefined,
+        language
+      )
+    };
   }
 
   private async completeWorkerTurn(
@@ -664,12 +670,12 @@ export class CodexBridgeService {
     return localize(language, {
       en: [
         "No repository is bound to this conversation.",
-        "Use `/codex bind <repo-id>` to bind one first, or mention the repository explicitly so the handler can bind it.",
+        'Use `/codex bind <repo-id>` or say `work on <repo-id>` to bind one first, or mention the repository explicitly so the handler can bind it.',
         `Available repositories: ${available.join(", ")}.`
       ].join(" "),
       zh: [
         "当前会话尚未绑定仓库。",
-        "请先使用 `/codex bind <repo-id>` 进行绑定，或者在消息里明确提到仓库，让 handler 帮你绑定。",
+        "请先使用 `/codex bind <repo-id>` 或直接说“切换到 <repo-id>”来完成绑定，或者在消息里明确提到仓库，让 handler 帮你绑定。",
         `可用仓库：${available.join(", ")}。`
       ].join(" ")
     });

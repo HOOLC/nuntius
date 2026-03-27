@@ -41,13 +41,110 @@ test("CodexRunner interrupts the active Codex process and preserves the session 
 });
 
 function buildInterruptibleCodexScript() {
-  return `#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\\n' '{"type":"thread.started","thread_id":"worker-session"}'
-trap 'exit 130' INT
-while true; do
-  sleep 1
-done
+  return `#!/usr/bin/env node
+const readline = require("node:readline");
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  crlfDelay: Infinity
+});
+
+let threadId = "worker-session";
+let turnId = "worker-turn";
+
+function send(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
+
+function sendResult(id, result) {
+  send({
+    jsonrpc: "2.0",
+    id,
+    result
+  });
+}
+
+(async () => {
+  for await (const line of rl) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    const message = JSON.parse(line);
+    switch (message.method) {
+      case "initialize":
+        sendResult(message.id, {
+          userAgent: "fake-codex",
+          codexHome: "/tmp/fake-codex-home",
+          platformFamily: "unix",
+          platformOs: "linux"
+        });
+        break;
+      case "notifications/initialized":
+      case "initialized":
+        break;
+      case "thread/start":
+        sendResult(message.id, {
+          thread: {
+            id: threadId
+          }
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "thread/started",
+          params: {
+            thread: {
+              id: threadId
+            }
+          }
+        });
+        break;
+      case "turn/start":
+        sendResult(message.id, {
+          turn: {
+            id: turnId,
+            items: [],
+            status: "inProgress",
+            error: null
+          }
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: {
+            threadId,
+            turn: {
+              id: turnId,
+              items: [],
+              status: "inProgress",
+              error: null
+            }
+          }
+        });
+        break;
+      case "turn/interrupt":
+        sendResult(message.id, null);
+        send({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: {
+            threadId,
+            turn: {
+              id: turnId,
+              items: [],
+              status: "interrupted",
+              error: null
+            }
+          }
+        });
+        process.exit(0);
+        break;
+      default:
+        sendResult(message.id, null);
+        break;
+    }
+  }
+})();
 `;
 }
 

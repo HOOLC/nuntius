@@ -77,13 +77,13 @@ export class InteractionRouter {
       }
       case "bind": {
         const binding = await this.bridge.bindConversation(turn, command.repositoryId);
-        const language = resolveConversationLanguage({
+        const bindLanguage = resolveConversationLanguage({
           binding,
           text: turn.text
         });
         await publisher.publishCompleted(turn, {
-          text: buildBindMessage(binding, language)
-        }, language);
+          text: buildBindMessage(binding, bindLanguage)
+        }, bindLanguage);
         return;
       }
       case "reset": {
@@ -203,6 +203,10 @@ function buildHelpMessage(language: ConversationLanguage): string {
     localize(language, {
       en: "plain text         -> follows the same route inside an existing conversation",
       zh: "普通文本           -> 在已有会话中遵循同样的路由规则"
+    }),
+    localize(language, {
+      en: 'natural language   -> the handler can interpret repo-routing requests like "work on <repo-id>"',
+      zh: '自然语言           -> handler 可以理解“切换到 <repo-id>”这类仓库路由请求'
     })
   ].join("\n");
 }
