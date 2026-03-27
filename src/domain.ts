@@ -38,6 +38,7 @@ export interface ConversationKey {
 export interface RepositoryBinding {
   repositoryId: string;
   repositoryPath: string;
+  boundByUserId?: string;
   sandboxMode: SandboxMode;
   model?: string;
   approvalPolicy?: ApprovalPolicy;

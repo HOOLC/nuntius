@@ -32,13 +32,14 @@ export function createConversationBinding(turn: InboundTurn): ConversationBindin
 
 export function bindRepository(
   binding: ConversationBinding,
-  repository: RepositoryTarget
+  repository: RepositoryTarget,
+  boundByUserId: string = binding.activeRepository?.boundByUserId ?? binding.createdByUserId
 ): ConversationBinding {
   const now = new Date().toISOString();
 
   return {
     ...binding,
-    activeRepository: deriveRepositoryBinding(binding.activeRepository, repository, now),
+    activeRepository: deriveRepositoryBinding(binding.activeRepository, repository, now, boundByUserId),
     updatedAt: now
   };
 }
@@ -47,10 +48,13 @@ export function refreshRepositoryBinding(
   binding: ConversationBinding,
   repository: RepositoryTarget
 ): ConversationBinding {
+  const boundByUserId = binding.activeRepository?.boundByUserId ?? binding.createdByUserId;
   const nextActiveRepository = deriveRepositoryBinding(
     binding.activeRepository,
     repository,
-    binding.activeRepository?.updatedAt ?? binding.updatedAt
+    binding.activeRepository?.updatedAt ?? binding.updatedAt,
+    boundByUserId,
+    true
   );
 
   if (repositoryBindingsEquivalent(binding.activeRepository, nextActiveRepository)) {
@@ -60,7 +64,7 @@ export function refreshRepositoryBinding(
   const now = new Date().toISOString();
   return {
     ...binding,
-    activeRepository: deriveRepositoryBinding(binding.activeRepository, repository, now),
+    activeRepository: deriveRepositoryBinding(binding.activeRepository, repository, now, boundByUserId, true),
     updatedAt: now
   };
 }
@@ -308,36 +312,53 @@ export function buildEffectiveTurn(
 function deriveRepositoryBinding(
   previous: RepositoryBinding | undefined,
   repository: RepositoryTarget,
-  updatedAt: string
+  updatedAt: string,
+  boundByUserId: string,
+  preserveLegacyBoundByUserId = false
 ): RepositoryBinding {
   const sandboxMode = getEffectiveSessionSandboxMode(repository.sandboxMode);
 
   return {
     repositoryId: repository.id,
     repositoryPath: repository.path,
+    boundByUserId,
     sandboxMode,
     model: repository.model,
     approvalPolicy: repository.approvalPolicy,
     codexConfigOverrides: repository.codexConfigOverrides ?? [],
     allowCodexNetworkAccess: Boolean(repository.allowCodexNetworkAccess),
     codexNetworkAccessWorkspacePath: repository.codexNetworkAccessWorkspacePath,
-    workerSessionId: shouldReuseWorkerSession(previous, repository) ? previous?.workerSessionId : undefined,
+    workerSessionId: shouldReuseWorkerSession(
+      previous,
+      repository,
+      boundByUserId,
+      preserveLegacyBoundByUserId
+    )
+      ? previous?.workerSessionId
+      : undefined,
     updatedAt
   };
 }
 
 function shouldReuseWorkerSession(
   previous: RepositoryBinding | undefined,
-  repository: RepositoryTarget
+  repository: RepositoryTarget,
+  boundByUserId: string,
+  preserveLegacyBoundByUserId: boolean
 ): boolean {
   if (!previous || previous.repositoryId !== repository.id) {
     return false;
   }
 
   const sandboxMode = getEffectiveSessionSandboxMode(repository.sandboxMode);
+  const previousBoundByUserId =
+    preserveLegacyBoundByUserId && previous.boundByUserId === undefined
+      ? boundByUserId
+      : previous.boundByUserId;
 
   return (
     previous.repositoryPath === repository.path &&
+    previousBoundByUserId === boundByUserId &&
     previous.sandboxMode === sandboxMode &&
     previous.model === repository.model &&
     previous.approvalPolicy === repository.approvalPolicy &&
@@ -355,6 +376,7 @@ function repositoryBindingsEquivalent(
   return (
     left?.repositoryId === right?.repositoryId &&
     left?.repositoryPath === right?.repositoryPath &&
+    left?.boundByUserId === right?.boundByUserId &&
     left?.sandboxMode === right?.sandboxMode &&
     left?.model === right?.model &&
     left?.approvalPolicy === right?.approvalPolicy &&

@@ -72,6 +72,61 @@ test("bound conversations route follow-up turns directly to the worker session",
   assert.ok(calls.every((call) => call.repositoryPath !== handlerDir));
 });
 
+test("bound conversations keep repo access for later turns from other users in the same thread", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-bound-access-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const calls = [];
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write",
+        allowUsers: ["U111"]
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+        return {
+          sessionId: request.sessionId ?? "worker-session-shared",
+          responseText: "Worker output.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const firstTurn = buildTurn("bind the repo");
+  await service.bindConversation(firstTurn, "repo");
+  await service.handleTurn(firstTurn, createPublisher());
+
+  const secondTurn = {
+    ...buildTurn("follow up from another user"),
+    userId: "U222",
+    userDisplayName: "bob"
+  };
+  const secondPublisher = createPublisher();
+  await service.handleTurn(secondTurn, secondPublisher);
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].repositoryPath, repoDir);
+  assert.equal(calls[1].sessionId, "worker-session-shared");
+  assert.deepEqual(secondPublisher.failed, []);
+  assert.deepEqual(secondPublisher.completed, ["Worker output."]);
+});
+
 test("worker turns expose attachment paths and return changed docx files", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-attachments-"));
   t.after(() => {
@@ -292,7 +347,7 @@ test("reconcileSessionBindings reloads persisted handler and worker settings fro
   assert.equal(status.binding?.handlerSessionId, undefined);
   assert.deepEqual(status.binding?.handlerConfig, {
     workspacePath: handlerDirB,
-    sandboxMode: "danger-full-access",
+    sandboxMode: "read-only",
     model: "handler-model-b",
     sessionConfigVersion: 1
   });
@@ -380,7 +435,7 @@ test("stale handler sessions are not resumed after handler config changes", asyn
   assert.equal(status.binding?.handlerSessionId, "handler-session-2");
   assert.deepEqual(status.binding?.handlerConfig, {
     workspacePath: handlerDirB,
-    sandboxMode: "danger-full-access",
+    sandboxMode: "read-only",
     model: "handler-model-b",
     sessionConfigVersion: 1
   });
@@ -438,7 +493,7 @@ test("system replies stay in Chinese after a conversation starts in Chinese", as
   assert.equal(status.binding?.language, "zh");
 });
 
-test("unbound handler turns replace legacy sessions and launch with full access", async (t) => {
+test("unbound handler turns replace legacy sessions and honor the configured sandbox", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-handler-sandbox-"));
   t.after(() => {
     rmSync(root, { recursive: true, force: true });
@@ -468,7 +523,7 @@ test("unbound handler turns replace legacy sessions and launch with full access"
           sessionId: request.sessionId ?? "handler-session-upgraded",
           responseText: JSON.stringify({
             action: "reply",
-            message: "Handler has full access."
+            message: "Handler used configured sandbox."
           }),
           rawEvents: [],
           stderrLines: []
@@ -501,14 +556,14 @@ test("unbound handler turns replace legacy sessions and launch with full access"
   assert.equal(calls.length, 1);
   assert.equal(calls[0].sessionId, undefined);
   assert.equal(calls[0].repositoryPath, handlerDir);
-  assert.equal(calls[0].sandboxMode, "danger-full-access");
-  assert.deepEqual(publisher.completed, ["Handler has full access."]);
+  assert.equal(calls[0].sandboxMode, "read-only");
+  assert.deepEqual(publisher.completed, ["Handler used configured sandbox."]);
 
   const status = await service.getConversationStatus(turn);
   assert.equal(status.binding?.handlerSessionId, "handler-session-upgraded");
   assert.deepEqual(status.binding?.handlerConfig, {
     workspacePath: handlerDir,
-    sandboxMode: "danger-full-access",
+    sandboxMode: "read-only",
     model: undefined,
     sessionConfigVersion: 1
   });
@@ -747,7 +802,166 @@ test("heartbeat updates refresh the working indicator when the publisher support
     publisher.progress.some((message) => message.includes("still working")),
     false
   );
-  assert.match(publisher.progress[0], /updated `README\.md`/);
+  assert.deepEqual(publisher.progress, []);
+});
+
+test("non-zero command exits do not emit progress noise", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-command-exit-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            exit_code: 1
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "file_change",
+            changes: [
+              {
+                path: path.join(repoDir, "README.md"),
+                kind: "update"
+              }
+            ]
+          }
+        });
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: "Done.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("inspect the repo");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.equal(
+    publisher.progress.some((message) => message.includes("saw a command exit with code")),
+    false
+  );
+  assert.deepEqual(publisher.progress, []);
+});
+
+test("absolute paths are stripped from progress and final replies", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-sanitize-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  const attachmentPath = path.join(root, "attachments", "draft.docx");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: `Editing ${attachmentPath}`
+          }
+        });
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: `Saved changes to ${attachmentPath}`,
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("update the draft");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(publisher.progress, ["Editing draft.docx"]);
+  assert.deepEqual(publisher.completed, ["Saved changes to draft.docx"]);
+  assert.equal(publisher.progress.some((message) => message.includes(root)), false);
+  assert.equal(publisher.completed.some((message) => message.includes(root)), false);
+});
+
+test("absolute paths are stripped from surfaced failures", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-sanitize-error-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  const attachmentPath = path.join(root, "attachments", "draft.docx");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn() {
+        throw new Error(`Could not open ${attachmentPath}`);
+      }
+    }
+  );
+
+  const turn = buildTurn("update the draft");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(publisher.failed, ["Could not open draft.docx"]);
+  assert.equal(publisher.failed.some((message) => message.includes(root)), false);
 });
 
 test("parseBridgeCommand maps clear commands to a fresh-context reset", () => {

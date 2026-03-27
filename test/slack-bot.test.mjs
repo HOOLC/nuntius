@@ -89,12 +89,10 @@ test("thread replies after bind go straight to the worker session and reuse it",
 
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["chat.postMessage", "chat.postMessage"]
+    ["chat.postMessage"]
   );
   assert.equal(harness.records[0].body.thread_ts, "1000");
-  assert.equal(harness.records[0].body.text, "Codex in `nuntius` updated `README.md`.");
-  assert.equal(harness.records[1].body.thread_ts, "1000");
-  assert.equal(harness.records[1].body.text, "Worker summary output.");
+  assert.equal(harness.records[0].body.text, "Worker summary output.");
   assert.deepEqual(
     harness.reactionRecords.map((record) => record.kind),
     ["reactions.add", "reactions.remove", "reactions.add"]
@@ -132,12 +130,10 @@ test("thread replies after bind go straight to the worker session and reuse it",
 
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["chat.postMessage", "chat.postMessage"]
+    ["chat.postMessage"]
   );
   assert.equal(harness.records[0].body.thread_ts, "1000");
-  assert.equal(harness.records[0].body.text, "Codex in `nuntius` updated `README.md`.");
-  assert.equal(harness.records[1].body.thread_ts, "1000");
-  assert.equal(harness.records[1].body.text, "Worker follow-up output.");
+  assert.equal(harness.records[0].body.text, "Worker follow-up output.");
   assert.deepEqual(
     harness.reactionRecords.map((record) => record.kind),
     ["reactions.add", "reactions.remove", "reactions.add"]

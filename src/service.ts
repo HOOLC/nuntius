@@ -281,7 +281,7 @@ export class CodexBridgeService {
         );
       const refreshed = this.refreshHandlerSessionBinding(existing);
       const repository = this.resolveRepository(turn, repositoryId);
-      const binding = bindRepository(refreshed, repository);
+      const binding = bindRepository(refreshed, repository, turn.userId);
 
       await this.sessionStore.upsert(binding);
       return binding;
@@ -397,7 +397,7 @@ export class CodexBridgeService {
         };
       case "bind_repo": {
         const repository = this.resolveRepository(turn, decision.repositoryId);
-        let nextBinding = bindRepository(binding, repository);
+        let nextBinding = bindRepository(binding, repository, turn.userId);
 
         if (!decision.continueWithWorkerPrompt) {
           return {
@@ -685,7 +685,7 @@ export class CodexBridgeService {
 
     return refreshRepositoryBinding(
       this.refreshHandlerSessionBinding(binding),
-      this.resolveRepository(turn, binding.activeRepository.repositoryId)
+      this.resolveRepositoryForBinding(binding, turn)
     );
   }
 
@@ -782,6 +782,27 @@ export class CodexBridgeService {
 
   private resolveRepositoryById(repositoryId: string): RepositoryTarget | undefined {
     return this.config.repositoryTargets.find((candidate) => candidate.id === repositoryId);
+  }
+
+  private resolveRepositoryForBinding(
+    binding: ConversationBinding,
+    turn: InboundTurn
+  ): RepositoryTarget {
+    if (!binding.activeRepository) {
+      throw new Error("A repository refresh was requested without an active repository binding.");
+    }
+
+    return this.resolveRepository(
+      {
+        ...turn,
+        platform: binding.key.platform,
+        workspaceId: binding.key.workspaceId,
+        channelId: binding.key.channelId,
+        threadId: binding.key.threadId,
+        userId: binding.activeRepository.boundByUserId ?? binding.createdByUserId
+      },
+      binding.activeRepository.repositoryId
+    );
   }
 
   private async runWithActiveTurn<T>(

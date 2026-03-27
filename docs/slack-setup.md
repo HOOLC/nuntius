@@ -84,6 +84,20 @@ npm run build
 npm run start
 ```
 
+To hand the process off to a transient user service when the host allows it:
+
+```bash
+NUNTIUS_LAUNCH_MODE=systemd-run npm run slack:start
+```
+
+Or for the combined launcher:
+
+```bash
+NUNTIUS_LAUNCH_MODE=systemd-run npm run start
+```
+
+This requires `systemd-run --user`. If host policy blocks transient user services, nuntius exits with a clear error instead of pretending the process stayed alive.
+
 ## Supported Slack Flows
 
 ### Slash Commands

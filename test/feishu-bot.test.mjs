@@ -213,18 +213,15 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.length === 2);
+  await waitFor(() => harness.records.length === 1);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.reply"]
+    ["message.reply"]
   );
   assert.equal(harness.records[0].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[0].body.msg_type, "text");
   assert.equal(harness.records[0].body.reply_in_thread, true);
-  assert.equal(readTextContent(harness.records[0]), "Codex in `nuntius` updated `README.md`.");
-  assert.equal(harness.records[1].path, "/im/v1/messages/om-root-1/reply");
-  assert.equal(harness.records[1].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[1]), "Worker summary output.");
+  assert.equal(readTextContent(harness.records[0]), "Worker summary output.");
   assert.deepEqual(
     harness.reactionRecords.map((record) => record.kind),
     ["reaction.create", "reaction.delete", "reaction.create"]
@@ -250,22 +247,19 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
       eventId: "evt-thread-2",
       messageId: "om-thread-user-2",
       rootId: "om-root-1",
-      threadId: "omt-thread-1",
       chatId: "oc-chat-1",
       chatType: "group",
       text: "summarize the changes"
     })
   );
 
-  await waitFor(() => harness.records.length === 2);
+  await waitFor(() => harness.records.length === 1);
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.reply"]
+    ["message.reply"]
   );
   assert.equal(harness.records[0].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[0]), "Codex in `nuntius` updated `README.md`.");
-  assert.equal(harness.records[1].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[1]), "Worker follow-up output.");
+  assert.equal(readTextContent(harness.records[0]), "Worker follow-up output.");
   assert.deepEqual(
     harness.reactionRecords.map((record) => record.kind),
     ["reaction.create", "reaction.delete", "reaction.create"]

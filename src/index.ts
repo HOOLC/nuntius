@@ -3,6 +3,7 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadNuntiusConfigFile, readTable } from "./config-file.js";
+import { maybeRelaunchCurrentProcessPersistently } from "./persistent-launch.js";
 
 type IntegrationName = "discord" | "feishu" | "slack";
 
@@ -90,6 +91,10 @@ export async function runConfiguredIntegrations(
 }
 
 export async function main(): Promise<void> {
+  if (await maybeRelaunchCurrentProcessPersistently({ label: "nuntius" })) {
+    return;
+  }
+
   await runConfiguredIntegrations();
 }
 

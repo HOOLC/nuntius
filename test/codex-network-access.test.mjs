@@ -170,6 +170,70 @@ test("binding the same repository keeps the worker session until network access 
   assert.equal(reboundWithNetworkDisabled.activeRepository?.workerSessionId, undefined);
 });
 
+test("repo-bound worker turns honor workspace-write sandbox and request outbound network", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-network-worker-launch-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  const networkDir = path.join(root, "network");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const calls = [];
+  const service = new CodexBridgeService(
+    {
+      codexBinary: "codex",
+      defaultRepositoryId: "repo",
+      requireExplicitRepositorySelection: true,
+      handlerWorkspacePath: handlerDir,
+      handlerSandboxMode: "read-only",
+      maxHandlerStepsPerTurn: 4,
+      repositoryTargets: [
+        {
+          id: "repo",
+          path: repoDir,
+          sandboxMode: "workspace-write",
+          allowCodexNetworkAccess: true,
+          codexNetworkAccessWorkspacePath: networkDir
+        }
+      ],
+      sessionStorePath: path.join(root, "sessions.json"),
+      maxResponseChars: 3500
+    },
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+        return {
+          sessionId: "worker-session-1",
+          responseText: "Fetched remote context.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn();
+  await service.bindConversation(turn, "repo");
+  await service.handleTurn(turn, createNoopPublisher());
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].repositoryPath, repoDir);
+  assert.equal(calls[0].sandboxMode, "workspace-write");
+  assert.equal(calls[0].searchEnabled, true);
+  assert.equal(calls[0].networkAccessEnabled, true);
+  assert.deepEqual(calls[0].addDirs, [networkDir]);
+
+  const status = await service.getConversationStatus(turn);
+  assert.equal(status.binding?.activeRepository?.sandboxMode, "workspace-write");
+  assert.equal(status.binding?.activeRepository?.workerSessionId, "worker-session-1");
+});
+
 test("worker failures with requested network access surface an explicit host-level warning", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-network-failure-"));
   t.after(() => {

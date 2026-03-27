@@ -656,7 +656,7 @@ export class FeishuBot {
     return {
       ...target,
       scope: "thread",
-      threadId: starter.threadId
+      threadId: target.replyMessageId
     };
   }
 
@@ -1166,11 +1166,13 @@ function buildBaseConversationTarget(
     };
   }
 
-  if (message.thread_id) {
+  const threadConversationId = message.root_id ?? message.thread_id;
+
+  if (threadConversationId) {
     return {
       workspaceId,
       channelId: message.chat_id,
-      threadId: message.thread_id,
+      threadId: threadConversationId,
       scope: "thread",
       replyMessageId: message.root_id ?? message.message_id
     };
