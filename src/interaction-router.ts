@@ -1,7 +1,8 @@
 import { localize, resolveConversationLanguage } from "./conversation-language.js";
 import { formatCodexNetworkAccess as formatCodexNetworkAccessLabel } from "./codex-network-access.js";
 import type { ConversationLanguage, InboundTurn } from "./domain.js";
-import type { CodexBridgeService, ConversationStatus, TurnPublisher } from "./service.js";
+import type { CodexBridgeService, ConversationStatus } from "./service.js";
+import type { TurnPublisher } from "./turn-publisher.js";
 
 export type BridgeCommand =
   | {

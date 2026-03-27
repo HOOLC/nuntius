@@ -1,6 +1,4 @@
-import { spawn } from "node:child_process";
 import process from "node:process";
-import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -19,6 +17,12 @@ import {
 } from "discord.js";
 
 import { DiscordAdapter } from "./adapters/discord.js";
+import {
+  formatBridgeFailure,
+  formatSessionReconciliationLines,
+  logSessionReconciliation,
+  runPackageScript
+} from "./bot-runtime-utils.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
 import {
   detectConversationLanguage,
@@ -36,9 +40,10 @@ import type { Attachment, ProcessingStatus } from "./domain.js";
 import { isProcessGuardActive, PROCESS_RESTART_EXIT_CODE } from "./process-guard.js";
 import {
   isSupervisorToWorkerMessage,
-  type DiscordWorkerMode,
-  type WorkerToSupervisorMessage
-} from "./discord-supervisor-protocol.js";
+  resolveWorkerMode,
+  sendWorkerMessage
+} from "./worker-supervisor-protocol.js";
+import { trimCodeFencePayload } from "./text-formatting.js";
 
 const DM_WORKSPACE_ID = "dm";
 const BRIDGE_PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -156,7 +161,7 @@ class DiscordBotWorker {
     } catch (error) {
       await replyEphemeral(
         interaction,
-        formatTopLevelError(error)
+        formatBridgeFailure("Discord", error)
       );
     }
   }
@@ -308,7 +313,7 @@ class DiscordBotWorker {
           await replyEphemeral(interaction, "Unsupported /codexadmin subcommand.");
       }
     } catch (error) {
-      await replyEphemeral(interaction, formatTopLevelError(error));
+      await replyEphemeral(interaction, formatBridgeFailure("Discord", error));
     }
   }
 
@@ -467,7 +472,7 @@ class DiscordBotWorker {
 
       await this.handleMentionInGuildChannel(message);
     } catch (error) {
-      await sendDiscordText(asSendableChannel(message.channel), formatTopLevelError(error));
+      await sendDiscordText(asSendableChannel(message.channel), formatBridgeFailure("Discord", error));
     }
   }
 
@@ -941,87 +946,24 @@ async function rebuildDiscordBridge(): Promise<{
   ok: boolean;
   output: string;
 }> {
-  return runBridgeScript("build");
+  return runPackageScript({
+    cwd: BRIDGE_PROJECT_ROOT,
+    scriptName: "build",
+    maxOutputLines: BUILD_OUTPUT_LINE_LIMIT,
+    maxOutputChars: BUILD_OUTPUT_CHAR_LIMIT
+  });
 }
 
 async function registerDiscordCommands(): Promise<{
   ok: boolean;
   output: string;
 }> {
-  return runBridgeScript("discord:register");
-}
-
-async function runBridgeScript(scriptName: string): Promise<{
-  ok: boolean;
-  output: string;
-}> {
-  const child = spawn(getNpmCommand(), ["run", scriptName], {
+  return runPackageScript({
     cwd: BRIDGE_PROJECT_ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
+    scriptName: "discord:register",
+    maxOutputLines: BUILD_OUTPUT_LINE_LIMIT,
+    maxOutputChars: BUILD_OUTPUT_CHAR_LIMIT
   });
-
-  const lines: string[] = [];
-  const appendLine = (line: string): void => {
-    if (!line.trim()) {
-      return;
-    }
-
-    lines.push(line);
-    if (lines.length > BUILD_OUTPUT_LINE_LIMIT) {
-      lines.splice(0, lines.length - BUILD_OUTPUT_LINE_LIMIT);
-    }
-  };
-
-  const stdoutReader = readline.createInterface({
-    input: child.stdout,
-    crlfDelay: Infinity
-  });
-
-  const stdoutTask = (async () => {
-    for await (const line of stdoutReader) {
-      appendLine(line);
-    }
-  })();
-
-  const stderrReader = readline.createInterface({
-    input: child.stderr,
-    crlfDelay: Infinity
-  });
-
-  const stderrTask = (async () => {
-    for await (const line of stderrReader) {
-      appendLine(line);
-    }
-  })();
-
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
-  });
-
-  await Promise.all([stdoutTask, stderrTask]);
-
-  return {
-    ok: exitCode === 0,
-    output: clipScriptOutput(lines.join("\n"))
-  };
-}
-
-function getNpmCommand(): string {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
-}
-
-function clipScriptOutput(output: string): string {
-  const trimmed = output.trim();
-  if (trimmed.length <= BUILD_OUTPUT_CHAR_LIMIT) {
-    return trimmed;
-  }
-
-  return `${trimmed.slice(trimmed.length - BUILD_OUTPUT_CHAR_LIMIT)}\n[truncated]`;
-}
-
-function trimCodeFencePayload(value: string): string {
-  return value.replace(/```/g, "`\u200b``").trim();
 }
 
 function formatScriptFailure(label: string, output: string, fallback: string): string {
@@ -1043,50 +985,6 @@ function formatScriptSuccessSummary(label: string, output: string, fallback: str
   ].join("\n");
 }
 
-function formatTopLevelError(error: unknown): string {
-  if (error instanceof Error) {
-    return `Discord bridge failure: ${error.message}`;
-  }
-
-  return "Discord bridge failure: unknown error.";
-}
-
-function logSessionReconciliation(
-  context: string,
-  result: {
-    totalBindings: number;
-    updatedBindings: number;
-    clearedHandlerSessions: number;
-    clearedWorkerSessions: number;
-    droppedRepositoryBindings: number;
-  }
-): void {
-  console.log(
-    `${context}: reconciled ${result.updatedBindings}/${result.totalBindings} persisted session bindings (cleared handler sessions=${result.clearedHandlerSessions}, cleared worker sessions=${result.clearedWorkerSessions}, dropped repository bindings=${result.droppedRepositoryBindings}).`
-  );
-}
-
-function formatSessionReconciliationLines(result: {
-  totalBindings: number;
-  updatedBindings: number;
-  clearedHandlerSessions: number;
-  clearedWorkerSessions: number;
-  droppedRepositoryBindings: number;
-}): string[] {
-  return [
-    `- Session bindings refreshed: ${result.updatedBindings}/${result.totalBindings}`,
-    `- Cleared handler sessions: ${result.clearedHandlerSessions}`,
-    `- Cleared worker sessions: ${result.clearedWorkerSessions}`,
-    `- Dropped repo bindings: ${result.droppedRepositoryBindings}`
-  ];
-}
-
-function sendWorkerMessage(message: WorkerToSupervisorMessage): void {
-  if (typeof process.send === "function") {
-    process.send(message);
-  }
-}
-
 async function probeWorkerStart(): Promise<void> {
   loadDiscordBotConfig();
   createBridgeRuntime();
@@ -1096,7 +994,7 @@ async function probeWorkerStart(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const mode = (process.env.NUNTIUS_DISCORD_WORKER_MODE ?? "run") as DiscordWorkerMode;
+  const mode = resolveWorkerMode(process.env.NUNTIUS_DISCORD_WORKER_MODE) ?? "run";
 
   if (mode === "probe") {
     await probeWorkerStart();

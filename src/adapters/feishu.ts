@@ -8,7 +8,12 @@ import type {
   ProcessingStatus
 } from "../domain.js";
 import type { InteractionRouter } from "../interaction-router.js";
-import type { TurnPublisher } from "../service.js";
+import type { TurnPublisher } from "../turn-publisher.js";
+import {
+  buildInboundTurn,
+  createProcessingStatusSynchronizer
+} from "./shared.js";
+import { trimCodeFencePayload } from "../text-formatting.js";
 
 export interface FeishuChatMessage {
   msgType: "file" | "interactive" | "text";
@@ -42,30 +47,19 @@ export class FeishuAdapter {
 
   async handleTurn(envelope: FeishuEnvelope): Promise<void> {
     await envelope.acknowledge();
-
-    const turn: InboundTurn = {
-      platform: "feishu",
-      workspaceId: envelope.workspaceId,
-      channelId: envelope.channelId,
-      threadId: envelope.threadId,
-      scope: envelope.scope,
-      userId: envelope.userId,
-      userDisplayName: envelope.userDisplayName,
-      text: envelope.text,
-      attachments: envelope.attachments ?? [],
-      repositoryId: envelope.repositoryId,
-      receivedAt: envelope.receivedAt ?? new Date().toISOString()
-    };
+    const turn = buildInboundTurn("feishu", envelope);
 
     await this.router.handleTurn(turn, new FeishuPublisher(envelope));
   }
 }
 
 class FeishuPublisher implements TurnPublisher {
+  private readonly syncProcessingStatus: (status: ProcessingStatus) => Promise<void>;
   private workingPlaceholderMessageId?: string;
-  private processingStatus?: ProcessingStatus;
 
-  constructor(private readonly envelope: FeishuEnvelope) {}
+  constructor(private readonly envelope: FeishuEnvelope) {
+    this.syncProcessingStatus = createProcessingStatusSynchronizer(envelope.syncStatusReaction);
+  }
 
   async publishQueued(_: InboundTurn, language: ConversationLanguage): Promise<void> {
     await this.syncProcessingStatus("queued");
@@ -223,20 +217,6 @@ class FeishuPublisher implements TurnPublisher {
   ): Promise<void> {
     return undefined;
   }
-
-  private async syncProcessingStatus(status: ProcessingStatus): Promise<void> {
-    if (!this.envelope.syncStatusReaction || this.processingStatus === status) {
-      return;
-    }
-
-    try {
-      await this.envelope.syncStatusReaction(status);
-      this.processingStatus = status;
-    } catch {
-      // Reaction failures should not abort the Feishu turn.
-    }
-  }
-
   private async replaceWorkingPlaceholder(message: FeishuChatMessage): Promise<boolean> {
     if (!this.workingPlaceholderMessageId || !this.envelope.updateMessage) {
       return false;
@@ -312,10 +292,6 @@ function renderFeishuError(
       trimCodeFencePayload(errorMessage)
     ].join("\n")
   );
-}
-
-function trimCodeFencePayload(value: string): string {
-  return value.replace(/```/g, "`\u200b``").trim();
 }
 
 function formatFeishuWorkingTimestamp(value: Date): string {

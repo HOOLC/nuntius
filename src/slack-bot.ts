@@ -9,6 +9,11 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SlackAdapter, type SlackEnvelope } from "./adapters/slack.js";
+import {
+  formatBridgeFailure,
+  formatSessionReconciliationLines,
+  logSessionReconciliation
+} from "./bot-runtime-utils.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
 import {
   detectConversationLanguage,
@@ -22,6 +27,7 @@ import {
   PROCESS_RESTART_EXIT_CODE,
   runModuleWithRestartGuard
 } from "./process-guard.js";
+import { maybeRelaunchCurrentProcessPersistently } from "./persistent-launch.js";
 import { loadSlackBotConfig, type SlackBotConfig } from "./slack-config.js";
 import type { Attachment, ProcessingStatus } from "./domain.js";
 
@@ -213,7 +219,7 @@ export class SlackBot {
 
       respondText(response, 404, "Not found");
     } catch (error) {
-      console.error(formatTopLevelError(error));
+      console.error(formatBridgeFailure("Slack", error));
 
       if (!response.headersSent) {
         respondText(response, 500, "Slack bridge failure");
@@ -317,7 +323,7 @@ export class SlackBot {
         );
       }
     } catch (error) {
-      await this.replyToResponseUrl(payload.response_url, formatTopLevelError(error));
+      await this.replyToResponseUrl(payload.response_url, formatBridgeFailure("Slack", error));
     }
   }
 
@@ -423,7 +429,7 @@ export class SlackBot {
           );
       }
     } catch (error) {
-      await this.replyToResponseUrl(payload.response_url, formatTopLevelError(error));
+      await this.replyToResponseUrl(payload.response_url, formatBridgeFailure("Slack", error));
     }
   }
 
@@ -465,7 +471,7 @@ export class SlackBot {
           threadId: event.thread_ts ?? event.ts,
           scope: event.thread_ts ? "thread" : "channel"
         },
-        formatTopLevelError(error)
+        formatBridgeFailure("Slack", error)
       );
     }
   }
@@ -1153,45 +1159,11 @@ function buildSlackThreadStarterMessage(userId: string, language: "en" | "zh"): 
   });
 }
 
-function formatTopLevelError(error: unknown): string {
-  if (error instanceof Error) {
-    return `Slack bridge failure: ${error.message}`;
-  }
-
-  return "Slack bridge failure: unknown error.";
-}
-
-function logSessionReconciliation(
-  context: string,
-  result: {
-    totalBindings: number;
-    updatedBindings: number;
-    clearedHandlerSessions: number;
-    clearedWorkerSessions: number;
-    droppedRepositoryBindings: number;
-  }
-): void {
-  console.log(
-    `${context}: reconciled ${result.updatedBindings}/${result.totalBindings} persisted session bindings (cleared handler sessions=${result.clearedHandlerSessions}, cleared worker sessions=${result.clearedWorkerSessions}, dropped repository bindings=${result.droppedRepositoryBindings}).`
-  );
-}
-
-function formatSessionReconciliationLines(result: {
-  totalBindings: number;
-  updatedBindings: number;
-  clearedHandlerSessions: number;
-  clearedWorkerSessions: number;
-  droppedRepositoryBindings: number;
-}): string[] {
-  return [
-    `- Session bindings refreshed: ${result.updatedBindings}/${result.totalBindings}`,
-    `- Cleared handler sessions: ${result.clearedHandlerSessions}`,
-    `- Cleared worker sessions: ${result.clearedWorkerSessions}`,
-    `- Dropped repo bindings: ${result.droppedRepositoryBindings}`
-  ];
-}
-
 export async function main(): Promise<void> {
+  if (await maybeRelaunchCurrentProcessPersistently({ label: "Slack bot" })) {
+    return;
+  }
+
   if (!isProcessGuardActive()) {
     await runModuleWithRestartGuard({
       label: "Slack bot",

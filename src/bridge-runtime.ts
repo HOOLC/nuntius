@@ -24,6 +24,8 @@ export interface BridgeRuntime {
   reconcileSessionBindings(): Promise<SessionReconciliationResult>;
 }
 
+type ReloadableBridgeConfig = Omit<BridgeConfig, "codexBinary" | "sessionStorePath">;
+
 export function createBridgeRuntime(config: BridgeConfig = loadConfig()): BridgeRuntime {
   const sessionStore = new FileSessionStore(config.sessionStorePath);
   const queue = new SerialTurnQueue();
@@ -38,33 +40,26 @@ export function createBridgeRuntime(config: BridgeConfig = loadConfig()): Bridge
     runner,
     bridge,
     router,
-    getRepositoryRegistrySnapshot: () => ({
-      defaultRepositoryId: config.defaultRepositoryId,
-      repositoryTargets: config.repositoryTargets,
-      source: config.configFilePath ? "file" : "env",
-      sourcePath: config.repositoryRegistryPath ?? config.configFilePath
-    }),
+    getRepositoryRegistrySnapshot: () => buildRepositoryRegistrySnapshot(config),
     reloadRepositoryRegistry: () => {
       const refreshed = loadConfig();
-
-      config.defaultRepositoryId = refreshed.defaultRepositoryId;
-      config.requireExplicitRepositorySelection = refreshed.requireExplicitRepositorySelection;
-      config.handlerWorkspacePath = refreshed.handlerWorkspacePath;
-      config.handlerSandboxMode = refreshed.handlerSandboxMode;
-      config.handlerModel = refreshed.handlerModel;
-      config.maxHandlerStepsPerTurn = refreshed.maxHandlerStepsPerTurn;
-      config.repositoryRegistryPath = refreshed.repositoryRegistryPath;
-      config.repositoryTargets = refreshed.repositoryTargets;
-      config.maxResponseChars = refreshed.maxResponseChars;
-      config.configFilePath = refreshed.configFilePath;
-
-      return {
-        defaultRepositoryId: config.defaultRepositoryId,
-        repositoryTargets: config.repositoryTargets,
-        source: config.configFilePath ? "file" : "env",
-        sourcePath: config.repositoryRegistryPath ?? config.configFilePath
-      };
+      Object.assign(config, getReloadableBridgeConfig(refreshed));
+      return buildRepositoryRegistrySnapshot(config);
     },
     reconcileSessionBindings: () => bridge.reconcileSessionBindings()
   };
+}
+
+function buildRepositoryRegistrySnapshot(config: BridgeConfig): RepositoryRegistrySnapshot {
+  return {
+    defaultRepositoryId: config.defaultRepositoryId,
+    repositoryTargets: config.repositoryTargets,
+    source: config.configFilePath ? "file" : "env",
+    sourcePath: config.repositoryRegistryPath ?? config.configFilePath
+  };
+}
+
+function getReloadableBridgeConfig(config: BridgeConfig): ReloadableBridgeConfig {
+  const { codexBinary: _codexBinary, sessionStorePath: _sessionStorePath, ...reloadable } = config;
+  return reloadable;
 }

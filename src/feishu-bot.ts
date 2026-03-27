@@ -2,8 +2,6 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import readline from "node:readline";
-import { fork, spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import * as Lark from "@larksuiteoapi/node-sdk";
@@ -15,6 +13,12 @@ import {
   type FeishuChatMessage,
   type FeishuEnvelope
 } from "./adapters/feishu.js";
+import {
+  formatBridgeFailure,
+  formatSessionReconciliationLines,
+  logSessionReconciliation,
+  runPackageScript
+} from "./bot-runtime-utils.js";
 import { createBridgeRuntime } from "./bridge-runtime.js";
 import {
   detectConversationLanguage,
@@ -30,11 +34,19 @@ import {
   PROCESS_RESTART_EXIT_CODE,
   runModuleWithRestartGuard
 } from "./process-guard.js";
+import { maybeRelaunchCurrentProcessPersistently } from "./persistent-launch.js";
+import { trimCodeFencePayload } from "./text-formatting.js";
+import {
+  isSupervisorToWorkerMessage,
+  resolveWorkerMode,
+  sendWorkerMessage,
+  sendWorkerMessageAndExit,
+  type WorkerMode,
+  type WorkerToSupervisorMessage
+} from "./worker-supervisor-protocol.js";
+import { ChildWorkerSupervisor } from "./worker-supervisor.js";
 
 const EVENT_DEDUP_TTL_MS = 10 * 60_000;
-const WORKER_BOOT_TIMEOUT_MS = 30_000;
-const WORKER_SHUTDOWN_TIMEOUT_MS = 10_000;
-const WORKER_RESPAWN_DELAY_MS = 1_000;
 const BUILD_OUTPUT_LINE_LIMIT = 40;
 const BUILD_OUTPUT_CHAR_LIMIT = 3500;
 const BRIDGE_PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -143,33 +155,13 @@ interface FlattenPostContext {
   mentionNames: Map<string, string>;
 }
 
-type FeishuWorkerMode = "probe" | "run";
-
-type FeishuWorkerToSupervisorMessage =
-  | {
-      type: "probe_ready";
-    }
-  | {
-      type: "ready";
-    }
-  | {
-      type: "request_hot_reload";
-    }
-  | {
-      type: "request_restart";
-    };
-
-type FeishuSupervisorToWorkerMessage = {
-  type: "shutdown";
-};
-
 interface FeishuBotRuntime {
   isSupervisorAvailable?: () => boolean;
   rebuildBridge?: () => Promise<{
     ok: boolean;
     output: string;
   }>;
-  sendWorkerMessage?: (message: FeishuWorkerToSupervisorMessage) => void;
+  sendWorkerMessage?: (message: WorkerToSupervisorMessage) => void;
 }
 
 export class FeishuBot {
@@ -257,7 +249,7 @@ export class FeishuBot {
     }
 
     void this.handleMessageEvent(payload).catch((error) => {
-      console.error(formatTopLevelError(error));
+      console.error(formatBridgeFailure("Feishu", error));
     });
   }
 
@@ -634,7 +626,7 @@ export class FeishuBot {
           );
       }
     } catch (error) {
-      await this.postAdminMessage(input.target, formatTopLevelError(error));
+      await this.postAdminMessage(input.target, formatBridgeFailure("Feishu", error));
     }
   }
 
@@ -815,7 +807,7 @@ export class FeishuBot {
     return this.runtime.rebuildBridge?.() ?? rebuildFeishuBridge();
   }
 
-  private sendWorkerMessage(message: FeishuWorkerToSupervisorMessage): void {
+  private sendWorkerMessage(message: WorkerToSupervisorMessage): void {
     if (this.runtime.sendWorkerMessage) {
       this.runtime.sendWorkerMessage(message);
       return;
@@ -1543,473 +1535,30 @@ function buildFeishuAdminHelp(): string {
   ].join("\n");
 }
 
-function formatTopLevelError(error: unknown): string {
-  if (error instanceof Error) {
-    return `Feishu bridge failure: ${error.message}`;
-  }
-
-  return "Feishu bridge failure: unknown error.";
-}
-
-function logSessionReconciliation(
-  context: string,
-  result: {
-    totalBindings: number;
-    updatedBindings: number;
-    clearedHandlerSessions: number;
-    clearedWorkerSessions: number;
-    droppedRepositoryBindings: number;
-  }
-): void {
-  console.log(
-    `${context}: reconciled ${result.updatedBindings}/${result.totalBindings} persisted session bindings (cleared handler sessions=${result.clearedHandlerSessions}, cleared worker sessions=${result.clearedWorkerSessions}, dropped repository bindings=${result.droppedRepositoryBindings}).`
-  );
-}
-
-function formatSessionReconciliationLines(result: {
-  totalBindings: number;
-  updatedBindings: number;
-  clearedHandlerSessions: number;
-  clearedWorkerSessions: number;
-  droppedRepositoryBindings: number;
-}): string[] {
-  return [
-    `- Session bindings refreshed: ${result.updatedBindings}/${result.totalBindings}`,
-    `- Cleared handler sessions: ${result.clearedHandlerSessions}`,
-    `- Cleared worker sessions: ${result.clearedWorkerSessions}`,
-    `- Dropped repo bindings: ${result.droppedRepositoryBindings}`
-  ];
-}
-
-function isWorkerToSupervisorMessage(
-  value: unknown
-): value is FeishuWorkerToSupervisorMessage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "type" in value &&
-    (value.type === "probe_ready" ||
-      value.type === "ready" ||
-      value.type === "request_hot_reload" ||
-      value.type === "request_restart")
-  );
-}
-
-function isSupervisorToWorkerMessage(
-  value: unknown
-): value is FeishuSupervisorToWorkerMessage {
-  return typeof value === "object" && value !== null && "type" in value && value.type === "shutdown";
-}
-
-function sendWorkerMessage(message: FeishuWorkerToSupervisorMessage): void {
-  if (typeof process.send !== "function") {
-    return;
-  }
-
-  process.send(message);
-}
-
-async function sendWorkerMessageAndExit(
-  message: FeishuWorkerToSupervisorMessage
-): Promise<void> {
-  if (typeof process.send === "function") {
-    await new Promise<void>((resolve, reject) => {
-      process.send?.(message, (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve();
-      });
-    });
-  }
-
-  process.exit(0);
-}
-
 async function rebuildFeishuBridge(): Promise<{
   ok: boolean;
   output: string;
 }> {
-  return runBridgeScript("build");
-}
-
-async function runBridgeScript(scriptName: string): Promise<{
-  ok: boolean;
-  output: string;
-}> {
-  const child = spawn(getNpmCommand(), ["run", scriptName], {
+  return runPackageScript({
     cwd: BRIDGE_PROJECT_ROOT,
-    stdio: ["ignore", "pipe", "pipe"]
+    scriptName: "build",
+    maxOutputLines: BUILD_OUTPUT_LINE_LIMIT,
+    maxOutputChars: BUILD_OUTPUT_CHAR_LIMIT
   });
-
-  const lines: string[] = [];
-  const appendLine = (line: string): void => {
-    if (!line.trim()) {
-      return;
-    }
-
-    lines.push(line);
-    if (lines.length > BUILD_OUTPUT_LINE_LIMIT) {
-      lines.splice(0, lines.length - BUILD_OUTPUT_LINE_LIMIT);
-    }
-  };
-
-  const stdoutReader = readline.createInterface({
-    input: child.stdout,
-    crlfDelay: Infinity
-  });
-
-  const stdoutTask = (async () => {
-    for await (const line of stdoutReader) {
-      appendLine(line);
-    }
-  })();
-
-  const stderrReader = readline.createInterface({
-    input: child.stderr,
-    crlfDelay: Infinity
-  });
-
-  const stderrTask = (async () => {
-    for await (const line of stderrReader) {
-      appendLine(line);
-    }
-  })();
-
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
-  });
-
-  await Promise.all([stdoutTask, stderrTask]);
-
-  return {
-    ok: exitCode === 0,
-    output: clipScriptOutput(lines.join("\n"))
-  };
-}
-
-function getNpmCommand(): string {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
-}
-
-function clipScriptOutput(output: string): string {
-  const trimmed = output.trim();
-  if (trimmed.length <= BUILD_OUTPUT_CHAR_LIMIT) {
-    return trimmed;
-  }
-
-  return `${trimmed.slice(trimmed.length - BUILD_OUTPUT_CHAR_LIMIT)}\n[truncated]`;
 }
 
 function formatScriptFailure(label: string, output: string, fallback: string): string {
   return [
     `[${label} failed]`,
-    trimTextPayload(output || fallback)
+    trimCodeFencePayload(output || fallback)
   ].join("\n");
 }
 
 function formatScriptSuccessSummary(label: string, output: string, fallback: string): string {
   return [
     `${label}:`,
-    trimTextPayload(output || fallback)
+    trimCodeFencePayload(output || fallback)
   ].join("\n");
-}
-
-function trimTextPayload(value: string): string {
-  return value.replace(/```/g, "`\u200b``").trim();
-}
-
-class FeishuBotSupervisor {
-  private readonly workerModulePath = fileURLToPath(import.meta.url);
-  private worker?: ChildProcess;
-  private shuttingDown = false;
-  private reloading = false;
-
-  async start(): Promise<void> {
-    this.installSignalHandlers();
-    this.worker = await this.startRunWorker("initial startup");
-  }
-
-  private installSignalHandlers(): void {
-    process.on("SIGHUP", () => {
-      void this.hotReload("SIGHUP");
-    });
-
-    process.on("SIGINT", () => {
-      void this.shutdownAndExit(0);
-    });
-
-    process.on("SIGTERM", () => {
-      void this.shutdownAndExit(0);
-    });
-  }
-
-  private async hotReload(reason: string): Promise<void> {
-    if (this.shuttingDown) {
-      return;
-    }
-
-    if (this.reloading) {
-      console.log(`Ignoring hot reload request while a reload is already in progress: ${reason}.`);
-      return;
-    }
-
-    this.reloading = true;
-
-    try {
-      console.log(`Hot reload requested: ${reason}. Probing the latest Feishu worker build.`);
-      await this.runProbe();
-      console.log("Probe succeeded. Replacing the active Feishu worker.");
-
-      const previousWorker = this.worker;
-      if (previousWorker) {
-        await this.stopWorker(previousWorker, "hot reload");
-      }
-
-      this.worker = await this.startRunWorker("hot reload");
-      console.log("Hot reload completed.");
-    } catch (error) {
-      const message = error instanceof Error ? error.stack ?? error.message : String(error);
-      console.error(`Hot reload failed:\n${message}`);
-    } finally {
-      this.reloading = false;
-    }
-  }
-
-  private async shutdownAndExit(exitCode: number): Promise<void> {
-    if (this.shuttingDown) {
-      return;
-    }
-
-    this.shuttingDown = true;
-
-    try {
-      if (this.worker) {
-        const activeWorker = this.worker;
-        this.worker = undefined;
-        await this.stopWorker(activeWorker, "supervisor shutdown");
-      }
-    } finally {
-      process.exit(exitCode);
-    }
-  }
-
-  private async startRunWorker(reason: string): Promise<ChildProcess> {
-    const child = this.spawnWorker("run");
-    this.attachRuntimeHandlers(child);
-    await this.waitForWorkerReady(child, "ready");
-    console.log(`Feishu worker ${child.pid ?? "unknown"} started for ${reason}.`);
-    return child;
-  }
-
-  private async runProbe(): Promise<void> {
-    const probe = this.spawnWorker("probe");
-    let probeReady = false;
-
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Timed out while probing the Feishu worker."));
-      }, WORKER_BOOT_TIMEOUT_MS);
-
-      probe.once("error", (error) => {
-        clearTimeout(timeout);
-        reject(error);
-      });
-
-      probe.on("message", (message) => {
-        if (isWorkerToSupervisorMessage(message) && message.type === "probe_ready") {
-          probeReady = true;
-        }
-      });
-
-      probe.once("exit", (code, signal) => {
-        clearTimeout(timeout);
-
-        if (probeReady && code === 0) {
-          resolve();
-          return;
-        }
-
-        reject(
-          new Error(
-            `Probe worker exited before confirming readiness (code=${code ?? "null"}, signal=${signal ?? "null"}).`
-          )
-        );
-      });
-    });
-  }
-
-  private attachRuntimeHandlers(child: ChildProcess): void {
-    child.on("message", (message) => {
-      if (!isWorkerToSupervisorMessage(message)) {
-        return;
-      }
-
-      this.handleWorkerMessage(child, message);
-    });
-
-    child.once("exit", (code, signal) => {
-      this.handleWorkerExit(child, code, signal);
-    });
-  }
-
-  private handleWorkerMessage(child: ChildProcess, message: FeishuWorkerToSupervisorMessage): void {
-    switch (message.type) {
-      case "ready":
-      case "probe_ready":
-        return;
-      case "request_hot_reload":
-        void this.hotReload(`admin request from worker ${child.pid ?? "unknown"}`);
-        return;
-      case "request_restart":
-        console.log("Supervisor exit requested by Feishu admin command.");
-        void this.shutdownAndExit(PROCESS_RESTART_EXIT_CODE);
-        return;
-    }
-  }
-
-  private handleWorkerExit(
-    child: ChildProcess,
-    code: number | null,
-    signal: NodeJS.Signals | null
-  ): void {
-    if (child !== this.worker) {
-      return;
-    }
-
-    this.worker = undefined;
-
-    if (this.shuttingDown) {
-      return;
-    }
-
-    if (this.reloading) {
-      console.log(
-        `Feishu worker ${child.pid ?? "unknown"} exited during reload (code=${code ?? "null"}, signal=${signal ?? "null"}).`
-      );
-      return;
-    }
-
-    console.error(
-      `Feishu worker ${child.pid ?? "unknown"} exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"}).`
-    );
-
-    setTimeout(() => {
-      if (this.shuttingDown || this.reloading || this.worker) {
-        return;
-      }
-
-      void this.startRunWorker("crash recovery")
-        .then((worker) => {
-          this.worker = worker;
-        })
-        .catch((error) => {
-          const message = error instanceof Error ? error.stack ?? error.message : String(error);
-          console.error(`Failed to restart Feishu worker after crash:\n${message}`);
-        });
-    }, WORKER_RESPAWN_DELAY_MS);
-  }
-
-  private spawnWorker(mode: FeishuWorkerMode): ChildProcess {
-    return fork(this.workerModulePath, [], {
-      env: {
-        ...process.env,
-        NUNTIUS_FEISHU_WORKER_MODE: mode
-      },
-      stdio: ["inherit", "inherit", "inherit", "ipc"]
-    });
-  }
-
-  private async waitForWorkerReady(
-    child: ChildProcess,
-    expectedMessageType: Extract<FeishuWorkerToSupervisorMessage["type"], "ready">
-  ): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Timed out while waiting for the Feishu worker to become ready."));
-      }, WORKER_BOOT_TIMEOUT_MS);
-
-      const cleanup = (): void => {
-        clearTimeout(timeout);
-        child.off("message", handleMessage);
-        child.off("error", handleError);
-        child.off("exit", handleExit);
-      };
-
-      const handleMessage = (message: unknown): void => {
-        if (!isWorkerToSupervisorMessage(message)) {
-          return;
-        }
-
-        if (message.type === expectedMessageType) {
-          cleanup();
-          resolve();
-        }
-      };
-
-      const handleError = (error: Error): void => {
-        cleanup();
-        reject(error);
-      };
-
-      const handleExit = (code: number | null, signal: NodeJS.Signals | null): void => {
-        cleanup();
-        reject(
-          new Error(
-            `Feishu worker exited before readiness (code=${code ?? "null"}, signal=${signal ?? "null"}).`
-          )
-        );
-      };
-
-      child.on("message", handleMessage);
-      child.once("error", handleError);
-      child.once("exit", handleExit);
-    });
-  }
-
-  private async stopWorker(child: ChildProcess, reason: string): Promise<void> {
-    if (child.exitCode !== null || child.killed) {
-      return;
-    }
-
-    console.log(`Stopping Feishu worker ${child.pid ?? "unknown"}: ${reason}.`);
-
-    await new Promise<void>((resolve) => {
-      const finish = (): void => {
-        clearTimeout(timeout);
-        child.off("exit", handleExit);
-        child.off("error", handleError);
-        resolve();
-      };
-
-      const handleExit = (): void => {
-        finish();
-      };
-
-      const handleError = (): void => {
-        finish();
-      };
-
-      const timeout = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, WORKER_SHUTDOWN_TIMEOUT_MS);
-
-      child.once("exit", handleExit);
-      child.once("error", handleError);
-
-      if (child.connected) {
-        child.send({
-          type: "shutdown"
-        } satisfies FeishuSupervisorToWorkerMessage);
-        return;
-      }
-
-      child.kill("SIGTERM");
-    });
-  }
 }
 
 function installSupervisorMessageHandler(bot: FeishuBot): void {
@@ -2026,15 +1575,7 @@ function installSupervisorMessageHandler(bot: FeishuBot): void {
   });
 }
 
-function resolveWorkerMode(raw: string | undefined): FeishuWorkerMode | undefined {
-  if (raw === "run" || raw === "probe") {
-    return raw;
-  }
-
-  return undefined;
-}
-
-async function startFeishuWorker(mode: FeishuWorkerMode): Promise<void> {
+async function startFeishuWorker(mode: WorkerMode): Promise<void> {
   const bot = new FeishuBot();
 
   if (mode === "probe") {
@@ -2058,11 +1599,20 @@ async function runFeishuProcess(): Promise<void> {
     return;
   }
 
-  const supervisor = new FeishuBotSupervisor();
+  const supervisor = new ChildWorkerSupervisor({
+    serviceLabel: "Feishu",
+    workerModulePath: fileURLToPath(import.meta.url),
+    workerModeEnvKey: "NUNTIUS_FEISHU_WORKER_MODE",
+    restartExitCode: PROCESS_RESTART_EXIT_CODE
+  });
   await supervisor.start();
 }
 
 export async function main(): Promise<void> {
+  if (await maybeRelaunchCurrentProcessPersistently({ label: "Feishu bot" })) {
+    return;
+  }
+
   if (!resolveWorkerMode(process.env.NUNTIUS_FEISHU_WORKER_MODE) && !isProcessGuardActive()) {
     await runModuleWithRestartGuard({
       label: "Feishu bot",

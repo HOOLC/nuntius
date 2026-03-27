@@ -10,7 +10,8 @@ import type {
   InboundTurn,
   OutboundMessage
 } from "./domain.js";
-import { CodexBridgeService, type ConversationStatus, type TurnPublisher } from "./service.js";
+import { CodexBridgeService, type ConversationStatus } from "./service.js";
+import type { TurnPublisher } from "./turn-publisher.js";
 
 interface LocalChatState {
   platform: "slack" | "discord" | "feishu";

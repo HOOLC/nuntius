@@ -8,7 +8,12 @@ import type {
   ProcessingStatus
 } from "../domain.js";
 import type { InteractionRouter } from "../interaction-router.js";
-import type { TurnPublisher } from "../service.js";
+import type { TurnPublisher } from "../turn-publisher.js";
+import {
+  buildInboundTurn,
+  createProcessingStatusSynchronizer
+} from "./shared.js";
+import { trimCodeFencePayload } from "../text-formatting.js";
 
 export interface SlackEnvelope {
   workspaceId: string;
@@ -33,30 +38,19 @@ export class SlackAdapter {
 
   async handleTurn(envelope: SlackEnvelope): Promise<void> {
     await envelope.acknowledge();
-
-    const turn: InboundTurn = {
-      platform: "slack",
-      workspaceId: envelope.workspaceId,
-      channelId: envelope.channelId,
-      threadId: envelope.threadId,
-      scope: envelope.scope,
-      userId: envelope.userId,
-      userDisplayName: envelope.userDisplayName,
-      text: envelope.text,
-      attachments: envelope.attachments ?? [],
-      repositoryId: envelope.repositoryId,
-      receivedAt: envelope.receivedAt ?? new Date().toISOString()
-    };
+    const turn = buildInboundTurn("slack", envelope);
 
     await this.router.handleTurn(turn, new SlackPublisher(envelope));
   }
 }
 
 class SlackPublisher implements TurnPublisher {
+  private readonly syncProcessingStatus: (status: ProcessingStatus) => Promise<void>;
   private statusMessageTs?: string;
-  private processingStatus?: ProcessingStatus;
 
-  constructor(private readonly envelope: SlackEnvelope) {}
+  constructor(private readonly envelope: SlackEnvelope) {
+    this.syncProcessingStatus = createProcessingStatusSynchronizer(envelope.syncStatusReaction);
+  }
 
   async publishQueued(_: InboundTurn, language: ConversationLanguage): Promise<void> {
     await this.syncProcessingStatus("queued");
@@ -154,20 +148,6 @@ class SlackPublisher implements TurnPublisher {
 
     await this.envelope.postMessage(renderSlackError(errorMessage, language));
   }
-
-  private async syncProcessingStatus(status: ProcessingStatus): Promise<void> {
-    if (!this.envelope.syncStatusReaction || this.processingStatus === status) {
-      return;
-    }
-
-    try {
-      await this.envelope.syncStatusReaction(status);
-      this.processingStatus = status;
-    } catch {
-      // Reaction failures should not abort the Slack turn.
-    }
-  }
-
   private async setStatusMessage(title: string, body: string): Promise<void> {
     const content = renderSlackStatus(title, body);
     await this.setMessage(content);
@@ -210,8 +190,4 @@ function renderSlackError(errorMessage: string, language: ConversationLanguage):
     trimCodeFencePayload(errorMessage),
     "```"
   ].join("\n");
-}
-
-function trimCodeFencePayload(value: string): string {
-  return value.replace(/```/g, "`\u200b``").trim();
 }
