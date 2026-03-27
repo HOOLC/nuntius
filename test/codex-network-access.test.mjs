@@ -132,6 +132,34 @@ test("CodexRunner launches the app server with network-aware worker settings for
   ]);
 });
 
+test("CodexRunner uses Codex's dangerous bypass flag for yolo turns", async (t) => {
+  const harness = createRunnerHarness();
+  t.after(() => harness.cleanup());
+
+  const runner = new CodexRunner(harness.paths.fakeCodexPath);
+  await runner.runTurn({
+    prompt: "inspect repo in yolo mode",
+    repositoryPath: harness.paths.repoDir,
+    sandboxMode: "danger-full-access",
+    approvalPolicy: "never"
+  });
+
+  const invocations = readArgInvocations(harness.paths.argLogPath);
+  assert.deepEqual(invocations[0], [
+    "--dangerously-bypass-approvals-and-sandbox",
+    "app-server",
+    "-c",
+    'approval_policy="never"'
+  ]);
+
+  const requests = readRequestLog(harness.paths.requestLogPath).filter(
+    (message) => message.method !== "notifications/initialized" && message.method !== "initialized"
+  );
+  assert.equal(requests[1].method, "thread/start");
+  assert.equal(requests[1].params.sandbox, "danger-full-access");
+  assert.equal(requests[2].params.sandboxPolicy.type, "dangerFullAccess");
+});
+
 test("binding the same repository keeps the worker session until network access settings change", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-network-binding-"));
   t.after(() => {
@@ -140,6 +168,7 @@ test("binding the same repository keeps the worker session until network access 
 
   const config = {
     codexBinary: "codex",
+    yoloMode: false,
     defaultRepositoryId: "repo",
     requireExplicitRepositorySelection: true,
     handlerWorkspacePath: root,
@@ -206,6 +235,7 @@ test("repo-bound worker turns honor workspace-write sandbox and request outbound
   const service = new CodexBridgeService(
     {
       codexBinary: "codex",
+      yoloMode: false,
       defaultRepositoryId: "repo",
       requireExplicitRepositorySelection: true,
       handlerWorkspacePath: handlerDir,
@@ -262,6 +292,7 @@ test("worker failures with requested network access surface an explicit host-lev
   const service = new CodexBridgeService(
     {
       codexBinary: "codex",
+      yoloMode: false,
       defaultRepositoryId: "repo",
       requireExplicitRepositorySelection: true,
       handlerWorkspacePath: root,

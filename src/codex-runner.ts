@@ -594,11 +594,19 @@ function uniquePaths(paths: string[]): string[] {
 function buildCommandPrefix(request: CodexTurnRequest): string[] {
   const args: string[] = [];
 
+  if (isYoloTurn(request)) {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  }
+
   if (request.searchEnabled) {
     args.push("--search");
   }
 
   return args;
+}
+
+function isYoloTurn(request: CodexTurnRequest): boolean {
+  return request.sandboxMode === "danger-full-access" && request.approvalPolicy === "never";
 }
 
 function appendConfigArgs(args: string[], request: CodexTurnRequest): void {

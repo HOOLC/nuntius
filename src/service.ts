@@ -348,6 +348,7 @@ export class CodexBridgeService {
           prompt,
           repositoryPath: handlerConfig.workspacePath,
           sandboxMode: handlerConfig.sandboxMode,
+          approvalPolicy: handlerConfig.approvalPolicy,
           sessionId: binding.handlerSessionId,
           model: handlerConfig.model,
           addDirs: listAttachmentAddDirs(turn.attachments),
@@ -631,13 +632,13 @@ export class CodexBridgeService {
       );
     }
 
-    return repository;
+    return this.applyRuntimeRepositoryPolicy(repository);
   }
 
   private listAccessibleRepositories(turn: InboundTurn): RepositoryTarget[] {
-    return this.config.repositoryTargets.filter((candidate) =>
-      this.hasRepositoryAccess(turn, candidate)
-    );
+    return this.config.repositoryTargets
+      .filter((candidate) => this.hasRepositoryAccess(turn, candidate))
+      .map((candidate) => this.applyRuntimeRepositoryPolicy(candidate));
   }
 
   private hasRepositoryAccess(turn: InboundTurn, repository: RepositoryTarget): boolean {
@@ -787,7 +788,20 @@ export class CodexBridgeService {
   }
 
   private resolveRepositoryById(repositoryId: string): RepositoryTarget | undefined {
-    return this.config.repositoryTargets.find((candidate) => candidate.id === repositoryId);
+    const repository = this.config.repositoryTargets.find((candidate) => candidate.id === repositoryId);
+    return repository ? this.applyRuntimeRepositoryPolicy(repository) : undefined;
+  }
+
+  private applyRuntimeRepositoryPolicy(repository: RepositoryTarget): RepositoryTarget {
+    if (!this.config.yoloMode) {
+      return repository;
+    }
+
+    return {
+      ...repository,
+      sandboxMode: "danger-full-access",
+      approvalPolicy: "never"
+    };
   }
 
   private resolveRepositoryForBinding(

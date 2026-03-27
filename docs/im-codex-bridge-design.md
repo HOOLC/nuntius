@@ -30,6 +30,11 @@ This design uses the locally available Codex app server over stdio:
 
 That is enough for both optional handler sessions and persistent worker sessions while keeping the bridge in control of interrupts and approval callbacks.
 
+The current bridge runtime also supports a bridge-level yolo override:
+
+- `bridge.yolo_mode = true` or unset: force all handler and worker turns to `danger-full-access` with `approvalPolicy: never`
+- `bridge.yolo_mode = false`: honor the configured handler and repository sandbox/approval settings
+
 ## Core Model
 
 Each IM conversation thread keeps two layers of state:
@@ -244,10 +249,10 @@ Rules:
 
 - the handler may mention only configured repository IDs
 - the bridge enforces channel and user access checks
-- the handler workspace should default to `read-only`
+- yolo mode is enabled by default and forces `danger-full-access` plus `approvalPolicy: never` for all Codex turns
+- set `bridge.yolo_mode = false` if you want to fall back to the per-handler and per-repository sandbox policy model
 - Codex network access should use a dedicated workspace for fetched artifacts and remain disableable per target
 - Codex CLI overrides for networked worker tasks should be explicit and reviewed per target
-- `danger-full-access` should be isolated to separate admin-only repository targets
 
 ## Slack Shape
 

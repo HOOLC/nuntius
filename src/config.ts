@@ -34,6 +34,7 @@ export interface RepositoryTarget {
 
 export interface BridgeConfig {
   codexBinary: string;
+  yoloMode?: boolean;
   defaultRepositoryId: string;
   requireExplicitRepositorySelection: boolean;
   handlerWorkspacePath: string;
@@ -73,6 +74,8 @@ export function loadConfig(): BridgeConfig {
 
   return {
     codexBinary: readString(bridgeRecord, "codex_binary") ?? process.env.NUNTIUS_CODEX_BINARY ?? "codex",
+    yoloMode:
+      readBoolean(bridgeRecord, "yolo_mode") ?? parseBooleanEnv(process.env.NUNTIUS_YOLO_MODE, true),
     defaultRepositoryId: registry.defaultRepositoryId,
     requireExplicitRepositorySelection:
       readBoolean(bridgeRecord, "require_explicit_repository_selection") ??

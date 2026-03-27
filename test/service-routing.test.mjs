@@ -348,8 +348,9 @@ test("reconcileSessionBindings reloads persisted handler and worker settings fro
   assert.deepEqual(status.binding?.handlerConfig, {
     workspacePath: handlerDirB,
     sandboxMode: "read-only",
+    approvalPolicy: undefined,
     model: "handler-model-b",
-    sessionConfigVersion: 1
+    sessionConfigVersion: 2
   });
   assert.equal(status.binding?.activeRepository?.repositoryPath, repoDirB);
   assert.equal(status.binding?.activeRepository?.model, "repo-model-b");
@@ -436,8 +437,9 @@ test("stale handler sessions are not resumed after handler config changes", asyn
   assert.deepEqual(status.binding?.handlerConfig, {
     workspacePath: handlerDirB,
     sandboxMode: "read-only",
+    approvalPolicy: undefined,
     model: "handler-model-b",
-    sessionConfigVersion: 1
+    sessionConfigVersion: 2
   });
 });
 
@@ -716,9 +718,83 @@ test("unbound handler turns replace legacy sessions and honor the configured san
   assert.deepEqual(status.binding?.handlerConfig, {
     workspacePath: handlerDir,
     sandboxMode: "read-only",
+    approvalPolicy: undefined,
     model: undefined,
-    sessionConfigVersion: 1
+    sessionConfigVersion: 2
   });
+});
+
+test("yolo mode forces handler and worker turns to run with danger-full-access and no approvals", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-yolo-mode-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const calls = [];
+  const service = new CodexBridgeService(
+    {
+      ...buildConfig(root, handlerDir, [
+        {
+          id: "repo",
+          path: repoDir,
+          sandboxMode: "workspace-write",
+          approvalPolicy: "on-request"
+        }
+      ]),
+      yoloMode: true
+    },
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+        if (calls.length === 1) {
+          return {
+            sessionId: "handler-session-yolo",
+            responseText: "[[ACTION:BIND(repo)]][[ACTION:DELEGATE(run the task)]]",
+            rawEvents: [],
+            stderrLines: []
+          };
+        }
+
+        return {
+          sessionId: "worker-session-yolo",
+          responseText: "Worker used yolo mode.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("work on repo");
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].repositoryPath, handlerDir);
+  assert.equal(calls[0].sandboxMode, "danger-full-access");
+  assert.equal(calls[0].approvalPolicy, "never");
+  assert.equal(calls[1].repositoryPath, repoDir);
+  assert.equal(calls[1].sandboxMode, "danger-full-access");
+  assert.equal(calls[1].approvalPolicy, "never");
+  assert.deepEqual(publisher.completed, ["Worker used yolo mode."]);
+
+  const status = await service.getConversationStatus(turn);
+  assert.deepEqual(status.binding?.handlerConfig, {
+    workspacePath: handlerDir,
+    sandboxMode: "danger-full-access",
+    approvalPolicy: "never",
+    model: undefined,
+    sessionConfigVersion: 2
+  });
+  assert.equal(status.binding?.activeRepository?.sandboxMode, "danger-full-access");
+  assert.equal(status.binding?.activeRepository?.approvalPolicy, "never");
 });
 
 test("resetState context clears Codex sessions but keeps the repository binding", async (t) => {
@@ -1136,6 +1212,7 @@ test("parseBridgeCommand maps clear commands to a fresh-context reset", () => {
 function buildConfig(root, handlerDir, repositoryTargets) {
   return {
     codexBinary: "codex",
+    yoloMode: false,
     defaultRepositoryId: repositoryTargets[0].id,
     requireExplicitRepositorySelection: true,
     handlerWorkspacePath: handlerDir,

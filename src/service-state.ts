@@ -6,6 +6,7 @@ import { detectConversationLanguage, localize } from "./conversation-language.js
 import type { BridgeConfig, RepositoryTarget } from "./config.js";
 import { hasCodexNetworkAccess } from "./codex-network-access.js";
 import type {
+  ApprovalPolicy,
   ConversationBinding,
   ConversationLanguage,
   HandlerSessionBinding,
@@ -17,7 +18,7 @@ import type {
 import { toConversationKey } from "./domain.js";
 import { sanitizeUserFacingText } from "./user-facing-text.js";
 
-const HANDLER_SESSION_CONFIG_VERSION = 1;
+const HANDLER_SESSION_CONFIG_VERSION = 2;
 
 export function createConversationBinding(turn: InboundTurn): ConversationBinding {
   const now = new Date().toISOString();
@@ -72,7 +73,8 @@ export function refreshRepositoryBinding(
 export function buildHandlerSessionConfig(config: BridgeConfig): HandlerSessionBinding {
   return {
     workspacePath: config.handlerWorkspacePath,
-    sandboxMode: getEffectiveSessionSandboxMode(config.handlerSandboxMode),
+    sandboxMode: getEffectiveSessionSandboxMode(config.handlerSandboxMode, config.yoloMode),
+    approvalPolicy: getEffectiveSessionApprovalPolicy(undefined, config.yoloMode),
     model: config.handlerModel,
     sessionConfigVersion: HANDLER_SESSION_CONFIG_VERSION
   };
@@ -96,6 +98,7 @@ export function handlerSessionConfigsEqual(
   return (
     left?.workspacePath === right?.workspacePath &&
     left?.sandboxMode === right?.sandboxMode &&
+    left?.approvalPolicy === right?.approvalPolicy &&
     left?.model === right?.model &&
     left?.sessionConfigVersion === right?.sessionConfigVersion
   );
@@ -316,7 +319,7 @@ function deriveRepositoryBinding(
   boundByUserId: string,
   preserveLegacyBoundByUserId = false
 ): RepositoryBinding {
-  const sandboxMode = getEffectiveSessionSandboxMode(repository.sandboxMode);
+  const sandboxMode = repository.sandboxMode;
 
   return {
     repositoryId: repository.id,
@@ -350,7 +353,8 @@ function shouldReuseWorkerSession(
     return false;
   }
 
-  const sandboxMode = getEffectiveSessionSandboxMode(repository.sandboxMode);
+  const sandboxMode = repository.sandboxMode;
+  const approvalPolicy = repository.approvalPolicy;
   const previousBoundByUserId =
     preserveLegacyBoundByUserId && previous.boundByUserId === undefined
       ? boundByUserId
@@ -361,7 +365,7 @@ function shouldReuseWorkerSession(
     previousBoundByUserId === boundByUserId &&
     previous.sandboxMode === sandboxMode &&
     previous.model === repository.model &&
-    previous.approvalPolicy === repository.approvalPolicy &&
+    previous.approvalPolicy === approvalPolicy &&
     Boolean(previous.allowCodexNetworkAccess) ===
       Boolean(repository.allowCodexNetworkAccess) &&
     previous.codexNetworkAccessWorkspacePath === repository.codexNetworkAccessWorkspacePath &&
@@ -387,8 +391,26 @@ function repositoryBindingsEquivalent(
   );
 }
 
-function getEffectiveSessionSandboxMode(sandboxMode: SandboxMode): SandboxMode {
+function getEffectiveSessionSandboxMode(
+  sandboxMode: SandboxMode,
+  yoloMode: boolean | undefined
+): SandboxMode {
+  if (yoloMode) {
+    return "danger-full-access";
+  }
+
   return sandboxMode;
+}
+
+function getEffectiveSessionApprovalPolicy(
+  approvalPolicy: ApprovalPolicy | undefined,
+  yoloMode: boolean | undefined
+): ApprovalPolicy | undefined {
+  if (yoloMode) {
+    return "never";
+  }
+
+  return approvalPolicy;
 }
 
 function arraysEqual(left: string[] | undefined, right: string[] | undefined): boolean {

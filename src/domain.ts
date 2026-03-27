@@ -52,6 +52,7 @@ export interface RepositoryBinding {
 export interface HandlerSessionBinding {
   workspacePath: string;
   sandboxMode: SandboxMode;
+  approvalPolicy?: ApprovalPolicy;
   model?: string;
   sessionConfigVersion?: number;
 }
