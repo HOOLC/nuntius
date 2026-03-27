@@ -39,6 +39,23 @@ If you do not use a separate registry file, you can also inline `[[repository_ta
 
 Environment variables still work as overrides and fallback, but they are no longer required.
 
+## Bridge Policy Defaults
+
+By default the bridge runs Codex in bridge-level yolo mode:
+
+```toml
+[bridge]
+yolo_mode = true
+```
+
+When `bridge.yolo_mode` is `true` or omitted, all handler and worker turns are forced to `danger-full-access` with `approvalPolicy: never`.
+
+Set `bridge.yolo_mode = false` if you want `bridge.handler_sandbox_mode` plus each repository target's `sandbox_mode` and `approval_policy` settings to take effect.
+
+Repository targets also default to `allow_codex_network_access = true`, so worker turns request web access with `codex --search` unless you disable that per repository.
+
+`bridge.progress_updates` defaults to `minimal`, which keeps intermediate replies sparse and prefers typing/heartbeat indicators when available. Set it to `verbose` to surface more per-step progress messages, or `off` to wait for the final reply.
+
 ## Discord Developer Portal
 
 Enable these bot capabilities:

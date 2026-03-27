@@ -174,6 +174,7 @@ test("binding the same repository keeps the worker session until network access 
     handlerWorkspacePath: root,
     handlerSandboxMode: "read-only",
     maxHandlerStepsPerTurn: 4,
+    progressUpdates: "minimal",
     repositoryTargets: [
       {
         id: "repo",
@@ -241,6 +242,7 @@ test("repo-bound worker turns honor workspace-write sandbox and request outbound
       handlerWorkspacePath: handlerDir,
       handlerSandboxMode: "read-only",
       maxHandlerStepsPerTurn: 4,
+      progressUpdates: "minimal",
       repositoryTargets: [
         {
           id: "repo",
@@ -298,6 +300,7 @@ test("worker failures with requested network access surface an explicit host-lev
       handlerWorkspacePath: root,
       handlerSandboxMode: "read-only",
       maxHandlerStepsPerTurn: 4,
+      progressUpdates: "minimal",
       repositoryTargets: [],
       sessionStorePath: path.join(root, "sessions.json"),
       maxResponseChars: 3500

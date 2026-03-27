@@ -37,6 +37,23 @@ repository_registry_path = "config/repository-registry.toml"
 
 Example format: [config/repository-registry.example.toml](/home/nomofu/nuntius/config/repository-registry.example.toml)
 
+## Bridge Policy Defaults
+
+By default the bridge runs Codex in bridge-level yolo mode:
+
+```toml
+[bridge]
+yolo_mode = true
+```
+
+When `bridge.yolo_mode` is `true` or omitted, all handler and worker turns are forced to `danger-full-access` with `approvalPolicy: never`.
+
+Set `bridge.yolo_mode = false` if you want `bridge.handler_sandbox_mode` plus each repository target's `sandbox_mode` and `approval_policy` settings to take effect.
+
+Repository targets also default to `allow_codex_network_access = true`, so worker turns request web access with `codex --search` unless you disable that per repository.
+
+`bridge.progress_updates` defaults to `minimal`, which keeps intermediate replies sparse and leans on status/heartbeat indicators when the adapter supports them. Set it to `verbose` to surface more per-step progress messages, or `off` to wait for the final reply.
+
 ## Slack App Setup
 
 This integration uses Slack's standard HTTPS request flow. You need a publicly reachable HTTPS URL for the command and events endpoints.
@@ -131,7 +148,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - Channel mentions start Codex inside a thread rooted on the user's message.
 - Once a thread is bound to a repo, later replies in that thread go straight to the bound worker session until `/codex bind` or `/codex reset` changes the state.
 - nuntius adds status reactions to inbound Slack messages when a concrete source message exists; slash commands keep their normal ephemeral acknowledgements.
-- Worker progress is posted as plain thread replies, while reactions on the inbound message show queued/working/finished state.
+- With the default `bridge.progress_updates = "minimal"`, Slack keeps intermediate worker replies sparse while reactions on the inbound message show queued/working/finished state.
 - `reloadconfig` reloads the bridge config and repository registry in-process.
 - `restart` only exits the current process. Use systemd, Docker restart policy, or another supervisor to bring it back up.
 - Listener host/port changes still require restarting the process.

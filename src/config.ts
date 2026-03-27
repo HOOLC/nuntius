@@ -19,6 +19,8 @@ import {
 } from "./config-file.js";
 import type { ApprovalPolicy, SandboxMode } from "./domain.js";
 
+export type ProgressUpdateMode = "off" | "minimal" | "verbose";
+
 export interface RepositoryTarget {
   id: string;
   path: string;
@@ -41,6 +43,7 @@ export interface BridgeConfig {
   handlerSandboxMode: SandboxMode;
   handlerModel?: string;
   maxHandlerStepsPerTurn: number;
+  progressUpdates: ProgressUpdateMode;
   repositoryRegistryPath?: string;
   repositoryTargets: RepositoryTarget[];
   sessionStorePath: string;
@@ -93,6 +96,11 @@ export function loadConfig(): BridgeConfig {
     maxHandlerStepsPerTurn:
       readPositiveInteger(bridgeRecord, "max_handler_steps_per_turn") ??
       parsePositiveIntEnv(process.env.NUNTIUS_MAX_HANDLER_STEPS_PER_TURN, 4),
+    progressUpdates: parseProgressUpdateMode(
+      readString(bridgeRecord, "progress_updates") ??
+        process.env.NUNTIUS_PROGRESS_UPDATES ??
+        "minimal"
+    ),
     repositoryRegistryPath,
     repositoryTargets: registry.repositoryTargets,
     sessionStorePath:
@@ -341,6 +349,14 @@ function parseApprovalPolicy(value: unknown): ApprovalPolicy {
   throw new Error(
     "approvalPolicy must be one of untrusted, on-failure, on-request, or never."
   );
+}
+
+function parseProgressUpdateMode(value: unknown): ProgressUpdateMode {
+  if (value === "off" || value === "minimal" || value === "verbose") {
+    return value;
+  }
+
+  throw new Error("progress_updates must be one of off, minimal, or verbose.");
 }
 
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {

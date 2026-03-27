@@ -1,3 +1,4 @@
+import type { ProgressUpdateMode } from "./config.js";
 import { localize } from "./conversation-language.js";
 import type {
   CodexEvent,
@@ -15,6 +16,10 @@ interface CodexProgressContext {
   actor: "handler" | "worker";
   repositoryId?: string;
   language: ConversationLanguage;
+}
+
+interface CodexProgressOptions {
+  mode: ProgressUpdateMode;
 }
 
 type ProgressMessage =
@@ -41,10 +46,15 @@ export class CodexRunProgressReporter {
   constructor(
     private readonly turn: InboundTurn,
     private readonly publisher: TurnPublisher,
-    private readonly context: CodexProgressContext
+    private readonly context: CodexProgressContext,
+    private readonly options: CodexProgressOptions
   ) {}
 
   start(): void {
+    if (!this.shouldPublishHeartbeats()) {
+      return;
+    }
+
     this.heartbeatTimer = setInterval(() => {
       const now = Date.now();
       if (now - this.lastActivityAt >= PROGRESS_HEARTBEAT_MS) {
@@ -56,7 +66,6 @@ export class CodexRunProgressReporter {
 
   onEvent(event: CodexEvent): void {
     this.lastActivityAt = Date.now();
-    this.hideWorkingIndicator();
 
     if (event.type === "turn.completed") {
       this.sawTurnCompleted = true;
@@ -68,6 +77,13 @@ export class CodexRunProgressReporter {
     if (!progress) {
       return;
     }
+
+    if (!this.shouldPublishProgress(progress.kind)) {
+      this.bufferedAgentMessage = undefined;
+      return;
+    }
+
+    this.hideWorkingIndicator();
 
     if (progress.kind === "agent_message") {
       this.flushBufferedAgent();
@@ -95,6 +111,10 @@ export class CodexRunProgressReporter {
   }
 
   private publishHeartbeat(): void {
+    if (!this.shouldPublishHeartbeats()) {
+      return;
+    }
+
     if (typeof this.publisher.refreshWorkingIndicator === "function") {
       this.refreshWorkingIndicator();
       return;
@@ -156,7 +176,27 @@ export class CodexRunProgressReporter {
 
     const message = this.bufferedAgentMessage;
     this.bufferedAgentMessage = undefined;
+
+    if (!this.shouldPublishProgress("agent_message")) {
+      return;
+    }
+
     this.enqueue(message);
+  }
+
+  private shouldPublishHeartbeats(): boolean {
+    return this.options.mode !== "off";
+  }
+
+  private shouldPublishProgress(kind: ProgressMessage["kind"]): boolean {
+    switch (this.options.mode) {
+      case "off":
+        return false;
+      case "minimal":
+        return kind === "status";
+      case "verbose":
+        return true;
+    }
   }
 
   private enqueue(message: string | undefined): void {

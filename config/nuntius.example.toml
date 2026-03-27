@@ -2,6 +2,9 @@
 codex_binary = "codex"
 default_repository_id = "nuntius"
 require_explicit_repository_selection = true
+# Keep intermediate progress replies sparse by default.
+# Use "verbose" to surface more step-by-step progress, or "off" to suppress them.
+progress_updates = "minimal"
 handler_workspace_path = "."
 handler_sandbox_mode = "danger-full-access"
 max_handler_steps_per_turn = 4

@@ -338,6 +338,8 @@ export class CodexBridgeService {
     const progress = new CodexRunProgressReporter(turn, publisher, {
       actor: "handler",
       language: binding.language ?? resolveConversationLanguage({ text: turn.text })
+    }, {
+      mode: this.config.progressUpdates
     });
 
     return this.runWithActiveTurn(turn, { actor: "handler" }, async (signal) => {
@@ -544,6 +546,8 @@ export class CodexBridgeService {
       actor: "worker",
       repositoryId: worker.repositoryId,
       language: binding.language ?? resolveConversationLanguage({ text: turn.text })
+    }, {
+      mode: this.config.progressUpdates
     });
     const documentFilesBefore = await captureTrackedDocumentFiles(turn.attachments);
 

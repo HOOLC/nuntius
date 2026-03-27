@@ -1099,6 +1099,57 @@ test("non-zero command exits do not emit progress noise", async (t) => {
   assert.deepEqual(publisher.progress, []);
 });
 
+test("default progress mode keeps agent progress updates out of intermediate replies", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-progress-minimal-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: "Editing README.md"
+          }
+        });
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: "Done.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("inspect the repo");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(publisher.progress, []);
+  assert.deepEqual(publisher.completed, ["Done."]);
+});
+
 test("absolute paths are stripped from progress and final replies", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-sanitize-"));
   t.after(() => {
@@ -1112,13 +1163,20 @@ test("absolute paths are stripped from progress and final replies", async (t) =>
   mkdirSync(repoDir, { recursive: true });
 
   const service = new CodexBridgeService(
-    buildConfig(root, handlerDir, [
+    buildConfig(
+      root,
+      handlerDir,
+      [
+        {
+          id: "repo",
+          path: repoDir,
+          sandboxMode: "workspace-write"
+        }
+      ],
       {
-        id: "repo",
-        path: repoDir,
-        sandboxMode: "workspace-write"
+        progressUpdates: "verbose"
       }
-    ]),
+    ),
     new FileSessionStore(path.join(root, "sessions.json")),
     new SerialTurnQueue(),
     {
@@ -1209,7 +1267,7 @@ test("parseBridgeCommand maps clear commands to a fresh-context reset", () => {
   });
 });
 
-function buildConfig(root, handlerDir, repositoryTargets) {
+function buildConfig(root, handlerDir, repositoryTargets, overrides = {}) {
   return {
     codexBinary: "codex",
     yoloMode: false,
@@ -1218,9 +1276,11 @@ function buildConfig(root, handlerDir, repositoryTargets) {
     handlerWorkspacePath: handlerDir,
     handlerSandboxMode: "read-only",
     maxHandlerStepsPerTurn: 4,
+    progressUpdates: "minimal",
     repositoryTargets,
     sessionStorePath: path.join(root, "sessions.json"),
-    maxResponseChars: 3500
+    maxResponseChars: 3500,
+    ...overrides
   };
 }
 
