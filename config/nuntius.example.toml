@@ -1,11 +1,17 @@
 [bridge]
 codex_binary = "codex"
+yolo_mode = true
+# When true or unset, all handler and worker turns run with
+# danger-full-access and approval_policy=never.
+# Set this to false to honor handler_sandbox_mode plus repository
+# sandbox_mode / approval_policy settings from the repo registry.
 default_repository_id = "nuntius"
 require_explicit_repository_selection = true
 # Keep intermediate progress replies sparse by default.
 # Use "verbose" to surface more step-by-step progress, or "off" to suppress them.
 progress_updates = "minimal"
 handler_workspace_path = "."
+# Only used when yolo_mode = false.
 handler_sandbox_mode = "danger-full-access"
 max_handler_steps_per_turn = 4
 session_store_path = ".nuntius/sessions.json"

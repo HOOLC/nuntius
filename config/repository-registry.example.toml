@@ -3,6 +3,9 @@ default_repository_id = "nuntius"
 [[repository_targets]]
 id = "nuntius"
 path = "/srv/repos/nuntius"
+# These per-target sandbox and approval settings are only applied when
+# bridge.yolo_mode = false. With the default yolo mode enabled, nuntius
+# forces all turns to danger-full-access with approval_policy=never.
 sandbox_mode = "danger-full-access"
 allow_channels = ["discord:123456789012345678:234567890123456789"]
 

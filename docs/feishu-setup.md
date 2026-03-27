@@ -111,6 +111,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - `/codex status`
 - `/codex repos`
 - `/codex reset [worker|binding|context|all]`
+- `/codex interrupt`
 - `/codex help`
 
 ### Admin Commands
