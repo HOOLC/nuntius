@@ -42,6 +42,8 @@ export class CodexRunProgressReporter {
   private sawTurnCompleted = false;
   private lastActivityAt = Date.now();
   private workingIndicatorVisible = false;
+  private completedCommandCount = 0;
+  private completedFileEditCount = 0;
 
   constructor(
     private readonly turn: InboundTurn,
@@ -73,7 +75,7 @@ export class CodexRunProgressReporter {
       return;
     }
 
-    const progress = describeProgressEvent(event, this.context);
+    const progress = this.describeProgressEvent(event);
     if (!progress) {
       return;
     }
@@ -93,6 +95,66 @@ export class CodexRunProgressReporter {
 
     this.flushBufferedAgent();
     this.enqueue(progress.message);
+  }
+
+  private describeProgressEvent(event: CodexEvent): ProgressMessage | undefined {
+    if (event.type !== "item.completed") {
+      return undefined;
+    }
+
+    return this.buildItemCompletedMessage(event.item);
+  }
+
+  private buildItemCompletedMessage(item: unknown): ProgressMessage | undefined {
+    if (!isRecord(item)) {
+      return undefined;
+    }
+
+    const toolSummary = this.buildToolSummaryMessage(item);
+    if (toolSummary) {
+      return toolSummary;
+    }
+
+    if (item.type === "agent_message" && typeof item.text === "string") {
+      return toProgressMessage(normalizeProgressText(item.text), "agent_message");
+    }
+
+    return undefined;
+  }
+
+  private buildToolSummaryMessage(
+    item: Record<string, unknown>
+  ): ProgressMessage | undefined {
+    if (item.type === "command_execution") {
+      this.completedCommandCount += 1;
+      return toProgressMessage(
+        formatToolUsageSummary(
+          this.context.language,
+          this.completedCommandCount,
+          this.completedFileEditCount
+        ),
+        "status"
+      );
+    }
+
+    if (item.type === "file_change") {
+      const fileEditCount = countFileEdits(item.changes);
+      if (fileEditCount < 1) {
+        return undefined;
+      }
+
+      this.completedFileEditCount += fileEditCount;
+      return toProgressMessage(
+        formatToolUsageSummary(
+          this.context.language,
+          this.completedCommandCount,
+          this.completedFileEditCount
+        ),
+        "status"
+      );
+    }
+
+    return undefined;
   }
 
   async stop(): Promise<void> {
@@ -225,17 +287,6 @@ export class CodexRunProgressReporter {
   }
 }
 
-function describeProgressEvent(
-  event: CodexEvent,
-  context: CodexProgressContext
-): ProgressMessage | undefined {
-  if (event.type === "item.completed") {
-    return buildItemCompletedMessage(event.item, context);
-  }
-
-  return undefined;
-}
-
 function buildHeartbeatMessage(context: CodexProgressContext): string {
   if (context.actor === "worker") {
     return localize(context.language, {
@@ -250,24 +301,49 @@ function buildHeartbeatMessage(context: CodexProgressContext): string {
   });
 }
 
-function buildItemCompletedMessage(
-  item: unknown,
-  context: CodexProgressContext
-): ProgressMessage | undefined {
-  if (!isRecord(item)) {
-    return undefined;
-  }
-
-  if (item.type === "agent_message" && typeof item.text === "string") {
-    return toProgressMessage(normalizeProgressText(item.text), "agent_message");
-  }
-
-  return undefined;
-}
-
 function normalizeProgressText(text: string): string | undefined {
   const normalized = sanitizeUserFacingText(text).trim();
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function formatToolUsageSummary(
+  language: ConversationLanguage,
+  commandCount: number,
+  fileEditCount: number
+): string | undefined {
+  const parts: string[] = [];
+
+  if (commandCount > 0) {
+    parts.push(
+      localize(language, {
+        en: `${commandCount} ${commandCount === 1 ? "command ran" : "commands ran"}`,
+        zh: `已运行 ${commandCount} 个命令`
+      })
+    );
+  }
+
+  if (fileEditCount > 0) {
+    parts.push(
+      localize(language, {
+        en: `${fileEditCount} ${fileEditCount === 1 ? "file change" : "file changes"}`,
+        zh: `已完成 ${fileEditCount} 次文件修改`
+      })
+    );
+  }
+
+  if (parts.length === 0) {
+    return undefined;
+  }
+
+  return `${parts.join(", ")}.`;
+}
+
+function countFileEdits(changes: unknown): number {
+  if (!Array.isArray(changes)) {
+    return 0;
+  }
+
+  return changes.filter((change) => isRecord(change)).length;
 }
 
 function toProgressMessage(

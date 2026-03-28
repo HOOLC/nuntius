@@ -13,7 +13,11 @@ import {
   buildInboundTurn,
   createProcessingStatusSynchronizer
 } from "./shared.js";
-import { trimCodeFencePayload } from "../text-formatting.js";
+import type { DiscordEditableMessage } from "../discord-delivery.js";
+import {
+  formatDiscordMessageText,
+  trimCodeFencePayload
+} from "../text-formatting.js";
 
 export interface DiscordEnvelope {
   workspaceId: string;
@@ -29,6 +33,7 @@ export interface DiscordEnvelope {
   deferReply: () => Promise<void>;
   startTyping?: () => Promise<{ stop(): Promise<void> }>;
   followUp: (message: string) => Promise<void>;
+  postProgressMessage?: (message: string) => Promise<DiscordEditableMessage | undefined>;
   syncStatusReaction?: (status: ProcessingStatus) => Promise<void>;
 }
 
@@ -48,6 +53,7 @@ class DiscordPublisher implements TurnPublisher {
   private typingLease?: {
     stop(): Promise<void>;
   };
+  private progressMessage?: DiscordEditableMessage;
 
   constructor(private readonly envelope: DiscordEnvelope) {
     this.syncProcessingStatus = createProcessingStatusSynchronizer(envelope.syncStatusReaction);
@@ -84,7 +90,7 @@ class DiscordPublisher implements TurnPublisher {
     _language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
-    await this.envelope.followUp(renderDiscordReply(message));
+    await this.setProgressMessage(renderDiscordReply(message));
   }
 
   async publishCompleted(
@@ -93,6 +99,7 @@ class DiscordPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("finished");
+    this.progressMessage = undefined;
     const suffix = message.truncated
       ? localize(language, {
           en: "\n\n_Reply truncated for Discord delivery._",
@@ -108,15 +115,18 @@ class DiscordPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("interrupted");
-    await this.envelope.followUp(
-      renderDiscordStatus(
-        localize(language, {
-          en: "Interrupted",
-          zh: "已中断"
-        }),
-        message
-      )
+    const reply = renderDiscordStatus(
+      localize(language, {
+        en: "Interrupted",
+        zh: "已中断"
+      }),
+      message
     );
+    if (await this.replaceProgressMessage(reply)) {
+      return;
+    }
+
+    await this.envelope.followUp(reply);
   }
 
   async publishFailed(
@@ -125,7 +135,12 @@ class DiscordPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("failed");
-    await this.envelope.followUp(renderDiscordError(errorMessage, language));
+    const reply = renderDiscordError(errorMessage, language);
+    if (await this.replaceProgressMessage(reply)) {
+      return;
+    }
+
+    await this.envelope.followUp(reply);
   }
 
   async showWorkingIndicator(
@@ -161,10 +176,34 @@ class DiscordPublisher implements TurnPublisher {
       // Typing failures should not abort the Discord turn.
     }
   }
+
+  private async setProgressMessage(message: string): Promise<void> {
+    if (this.progressMessage) {
+      await this.progressMessage.edit(message);
+      return;
+    }
+
+    if (this.envelope.postProgressMessage) {
+      this.progressMessage = await this.envelope.postProgressMessage(message);
+      return;
+    }
+
+    await this.envelope.followUp(message);
+  }
+
+  private async replaceProgressMessage(message: string): Promise<boolean> {
+    if (!this.progressMessage) {
+      return false;
+    }
+
+    await this.progressMessage.edit(message);
+    this.progressMessage = undefined;
+    return true;
+  }
 }
 
 function renderDiscordStatus(title: string, body: string): string {
-  const normalizedBody = body.trim();
+  const normalizedBody = formatDiscordMessageText(body).trim();
   const quotedBody = normalizedBody
     .split("\n")
     .map((line) => (line.length > 0 ? `> ${line}` : ">"))
@@ -174,7 +213,7 @@ function renderDiscordStatus(title: string, body: string): string {
 }
 
 function renderDiscordReply(body: string): string {
-  return body.trim();
+  return formatDiscordMessageText(body).trim();
 }
 
 function renderDiscordError(

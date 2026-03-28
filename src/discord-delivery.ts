@@ -1,5 +1,9 @@
 export const DISCORD_MESSAGE_LIMIT = 1900;
 
+export interface DiscordEditableMessage {
+  edit(content: string): Promise<unknown>;
+}
+
 export interface DiscordSendableChannel {
   send(content: string): Promise<unknown>;
   sendTyping?(): Promise<void>;
@@ -32,6 +36,26 @@ export async function sendDiscordText(
   for (const chunk of splitDiscordMessage(content)) {
     await channel.send(chunk);
   }
+}
+
+export async function sendDiscordEditableText(
+  channel: DiscordSendableChannel,
+  content: string
+): Promise<DiscordEditableMessage | undefined> {
+  const chunks = splitDiscordMessage(content);
+  if (chunks.length === 0) {
+    return undefined;
+  }
+
+  let editableMessage: DiscordEditableMessage | undefined;
+  for (let index = 0; index < chunks.length; index += 1) {
+    const result = await channel.send(chunks[index]);
+    if (index === 0 && chunks.length === 1 && isDiscordEditableMessage(result)) {
+      editableMessage = result;
+    }
+  }
+
+  return editableMessage;
 }
 
 export async function sendDiscordInteractionResponse(
@@ -134,6 +158,15 @@ export function splitDiscordMessage(content: string): string[] {
 
   flush();
   return chunks;
+}
+
+function isDiscordEditableMessage(value: unknown): value is DiscordEditableMessage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "edit" in value &&
+    typeof value.edit === "function"
+  );
 }
 
 function canAppendDiscordSegment(

@@ -1030,7 +1030,7 @@ test("heartbeat updates refresh the working indicator when the publisher support
     publisher.progress.some((message) => message.includes("still working")),
     false
   );
-  assert.deepEqual(publisher.progress, []);
+  assert.deepEqual(publisher.progress, ["1 file change."]);
 });
 
 test("non-zero command exits do not emit progress noise", async (t) => {
@@ -1096,7 +1096,87 @@ test("non-zero command exits do not emit progress noise", async (t) => {
     publisher.progress.some((message) => message.includes("saw a command exit with code")),
     false
   );
-  assert.deepEqual(publisher.progress, []);
+  assert.deepEqual(publisher.progress, [
+    "1 command ran.",
+    "1 command ran, 1 file change."
+  ]);
+});
+
+test("tool activity updates the progress summary as commands and file changes complete", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-tool-progress-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            exit_code: 0
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "file_change",
+            changes: [
+              {
+                path: path.join(repoDir, "README.md"),
+                kind: "update"
+              },
+              {
+                path: path.join(repoDir, "package.json"),
+                kind: "update"
+              }
+            ]
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            exit_code: 0
+          }
+        });
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: "Done.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("inspect the repo");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(publisher.progress, [
+    "1 command ran.",
+    "1 command ran, 2 file changes.",
+    "2 commands ran, 2 file changes."
+  ]);
 });
 
 test("default progress mode keeps agent progress updates out of intermediate replies", async (t) => {

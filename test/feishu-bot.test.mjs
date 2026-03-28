@@ -213,15 +213,18 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.length === 1);
+  await waitFor(() => harness.records.some((record) => record.kind === "message.update"));
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply"]
+    ["message.reply", "message.update"]
   );
   assert.equal(harness.records[0].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[0].body.msg_type, "text");
   assert.equal(harness.records[0].body.reply_in_thread, true);
-  assert.equal(readTextContent(harness.records[0]), "Worker summary output.");
+  assert.equal(readTextContent(harness.records[0]), "1 file change.");
+  assert.equal(harness.records[1].path, "/im/v1/messages/om-message-1");
+  assert.equal(harness.records[1].body.msg_type, "text");
+  assert.equal(readTextContent(harness.records[1]), "Worker summary output.");
   assert.deepEqual(
     harness.reactionRecords.map((record) => record.kind),
     ["reaction.create", "reaction.delete", "reaction.create"]
@@ -253,13 +256,16 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.length === 1);
+  await waitFor(() => harness.records.some((record) => record.kind === "message.update"));
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply"]
+    ["message.reply", "message.update"]
   );
   assert.equal(harness.records[0].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[0]), "Worker follow-up output.");
+  assert.equal(readTextContent(harness.records[0]), "1 file change.");
+  assert.equal(harness.records[1].path, "/im/v1/messages/om-message-1");
+  assert.equal(harness.records[1].body.msg_type, "text");
+  assert.equal(readTextContent(harness.records[1]), "Worker follow-up output.");
   assert.deepEqual(
     harness.reactionRecords.map((record) => record.kind),
     ["reaction.create", "reaction.delete", "reaction.create"]
@@ -352,7 +358,7 @@ test("thread file attachments are downloaded, exposed to Codex, and returned as 
 
   const summaryReply = harness.records.find(
     (record) =>
-      record.kind === "message.reply" &&
+      record.kind === "message.update" &&
       record.body.msg_type === "text" &&
       readTextContent(record) === "Worker summary output."
   );

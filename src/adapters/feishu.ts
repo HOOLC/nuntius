@@ -55,7 +55,7 @@ export class FeishuAdapter {
 
 class FeishuPublisher implements TurnPublisher {
   private readonly syncProcessingStatus: (status: ProcessingStatus) => Promise<void>;
-  private workingPlaceholderMessageId?: string;
+  private progressMessageId?: string;
 
   constructor(private readonly envelope: FeishuEnvelope) {
     this.syncProcessingStatus = createProcessingStatusSynchronizer(envelope.syncStatusReaction);
@@ -92,12 +92,7 @@ class FeishuPublisher implements TurnPublisher {
     _language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
-    const progressMessage = renderFeishuTextMessage(message);
-    if (await this.replaceWorkingPlaceholder(progressMessage)) {
-      return;
-    }
-
-    await this.envelope.postMessage(progressMessage);
+    await this.setProgressMessage(renderFeishuTextMessage(message));
   }
 
   async publishCompleted(
@@ -107,7 +102,7 @@ class FeishuPublisher implements TurnPublisher {
   ): Promise<void> {
     await this.syncProcessingStatus("finished");
     const replyMessage = renderFeishuReply(message.text, message.truncated, language);
-    if (!(await this.replaceWorkingPlaceholder(replyMessage))) {
+    if (!(await this.replaceProgressMessage(replyMessage))) {
       await this.envelope.postMessage(replyMessage);
     }
 
@@ -146,17 +141,15 @@ class FeishuPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("interrupted");
-    if (
-      await this.replaceWorkingPlaceholder(
-        renderFeishuStatus(
-          localize(language, {
-            en: "Interrupted",
-            zh: "已中断"
-          }),
-          message
-        )
+    if (await this.replaceProgressMessage(
+      renderFeishuStatus(
+        localize(language, {
+          en: "Interrupted",
+          zh: "已中断"
+        }),
+        message
       )
-    ) {
+    )) {
       return;
     }
 
@@ -177,7 +170,7 @@ class FeishuPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("failed");
-    if (await this.replaceWorkingPlaceholder(renderFeishuError(errorMessage, language))) {
+    if (await this.replaceProgressMessage(renderFeishuError(errorMessage, language))) {
       return;
     }
 
@@ -189,26 +182,18 @@ class FeishuPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
-    const placeholder = renderFeishuStatus(
-      localize(language, {
-        en: "Working",
-        zh: "处理中"
-      }),
-      localize(language, {
-        en: `Still working. Last update: ${formatFeishuWorkingTimestamp(new Date())}`,
-        zh: `仍在处理中。最近更新：${formatFeishuWorkingTimestamp(new Date())}`
-      })
+    await this.setProgressMessage(
+      renderFeishuStatus(
+        localize(language, {
+          en: "Working",
+          zh: "处理中"
+        }),
+        localize(language, {
+          en: `Still working. Last update: ${formatFeishuWorkingTimestamp(new Date())}`,
+          zh: `仍在处理中。最近更新：${formatFeishuWorkingTimestamp(new Date())}`
+        })
+      )
     );
-
-    if (this.workingPlaceholderMessageId && this.envelope.updateMessage) {
-      await this.envelope.updateMessage(this.workingPlaceholderMessageId, placeholder);
-      return;
-    }
-
-    const result = await this.envelope.postMessage(placeholder);
-    if (result.messageId && this.envelope.updateMessage) {
-      this.workingPlaceholderMessageId = result.messageId;
-    }
   }
 
   async hideWorkingIndicator(
@@ -217,13 +202,26 @@ class FeishuPublisher implements TurnPublisher {
   ): Promise<void> {
     return undefined;
   }
-  private async replaceWorkingPlaceholder(message: FeishuChatMessage): Promise<boolean> {
-    if (!this.workingPlaceholderMessageId || !this.envelope.updateMessage) {
+
+  private async setProgressMessage(message: FeishuChatMessage): Promise<void> {
+    if (this.progressMessageId && this.envelope.updateMessage) {
+      await this.envelope.updateMessage(this.progressMessageId, message);
+      return;
+    }
+
+    const result = await this.envelope.postMessage(message);
+    if (result.messageId && this.envelope.updateMessage) {
+      this.progressMessageId = result.messageId;
+    }
+  }
+
+  private async replaceProgressMessage(message: FeishuChatMessage): Promise<boolean> {
+    if (!this.progressMessageId || !this.envelope.updateMessage) {
       return false;
     }
 
-    await this.envelope.updateMessage(this.workingPlaceholderMessageId, message);
-    this.workingPlaceholderMessageId = undefined;
+    await this.envelope.updateMessage(this.progressMessageId, message);
+    this.progressMessageId = undefined;
     return true;
   }
 }

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { FeishuAdapter } from "../dist/adapters/feishu.js";
 
-test("Feishu refreshes a single working placeholder and replaces it with real progress", async () => {
+test("Feishu reuses one progress message for heartbeats, progress updates, and the final reply", async () => {
   const postedMessages = [];
   const updatedMessages = [];
   let acknowledged = 0;
@@ -20,7 +20,8 @@ test("Feishu refreshes a single working placeholder and replaces it with real pr
       assert.equal(postedMessages.length, 1);
       assert.equal(updatedMessages.length, 1);
 
-      await publisher.publishProgress(turn, "Codex updated `README.md`.");
+      await publisher.publishProgress(turn, "1 command ran.");
+      await publisher.publishProgress(turn, "1 command ran, 2 file changes.");
       await publisher.publishCompleted(turn, {
         text: "Finished.",
         truncated: false
@@ -55,11 +56,8 @@ test("Feishu refreshes a single working placeholder and replaces it with real pr
     JSON.parse(postedMessages[0].content).text,
     /\[Working\]\nStill working\. Last update: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/
   );
-  assert.deepEqual(
-    postedMessages.slice(1).map((message) => JSON.parse(message.content).text),
-    ["Finished."]
-  );
-  assert.equal(updatedMessages.length, 2);
+  assert.deepEqual(postedMessages.slice(1), []);
+  assert.equal(updatedMessages.length, 4);
   assert.equal(updatedMessages[0].messageId, "om-working-1");
   assert.match(
     JSON.parse(updatedMessages[0].message.content).text,
@@ -68,6 +66,16 @@ test("Feishu refreshes a single working placeholder and replaces it with real pr
   assert.equal(updatedMessages[1].messageId, "om-working-1");
   assert.equal(
     JSON.parse(updatedMessages[1].message.content).text,
-    "Codex updated `README.md`."
+    "1 command ran."
+  );
+  assert.equal(updatedMessages[2].messageId, "om-working-1");
+  assert.equal(
+    JSON.parse(updatedMessages[2].message.content).text,
+    "1 command ran, 2 file changes."
+  );
+  assert.equal(updatedMessages[3].messageId, "om-working-1");
+  assert.equal(
+    JSON.parse(updatedMessages[3].message.content).text,
+    "Finished."
   );
 });

@@ -32,6 +32,7 @@ import {
 import { loadDiscordBotConfig } from "./discord-config.js";
 import {
   sendDiscordInteractionResponse,
+  sendDiscordEditableText,
   sendDiscordText,
   type DiscordInteractionDeliveryState,
   type DiscordSendableChannel
@@ -354,7 +355,8 @@ class DiscordBotWorker {
       receivedAt: new Date().toISOString(),
       deferReply: () => ack.defer(),
       startTyping: () => startDiscordTyping(target.outputChannel),
-      followUp: (message) => sendDiscordText(target.outputChannel, message)
+      followUp: (message) => sendDiscordText(target.outputChannel, message),
+      postProgressMessage: (message) => sendDiscordEditableText(target.outputChannel, message)
     });
 
     const language = detectConversationLanguage(prompt);
@@ -393,7 +395,8 @@ class DiscordBotWorker {
       receivedAt: new Date().toISOString(),
       deferReply: () => ack.defer(),
       startTyping: () => startDiscordTyping(target.outputChannel),
-      followUp: (message) => sendDiscordText(target.outputChannel, message)
+      followUp: (message) => sendDiscordText(target.outputChannel, message),
+      postProgressMessage: (message) => sendDiscordEditableText(target.outputChannel, message)
     });
 
     const status = target.threadId
@@ -477,6 +480,8 @@ class DiscordBotWorker {
   }
 
   private async handleDmMessage(message: Message): Promise<void> {
+    const channel = asSendableChannel(message.channel);
+
     await this.adapter.handleTurn({
       workspaceId: DM_WORKSPACE_ID,
       channelId: message.channel.id,
@@ -487,8 +492,9 @@ class DiscordBotWorker {
       attachments: mapMessageAttachments(message),
       receivedAt: message.createdAt.toISOString(),
       deferReply: async () => undefined,
-      startTyping: () => startDiscordTyping(asSendableChannel(message.channel)),
-      followUp: (content) => sendDiscordText(asSendableChannel(message.channel), content),
+      startTyping: () => startDiscordTyping(channel),
+      followUp: (content) => sendDiscordText(channel, content),
+      postProgressMessage: (content) => sendDiscordEditableText(channel, content),
       syncStatusReaction: createDiscordStatusReactionSyncer(message)
     });
   }
@@ -541,6 +547,7 @@ class DiscordBotWorker {
       deferReply: async () => undefined,
       startTyping: () => startDiscordTyping(thread),
       followUp: (content) => sendDiscordText(thread, content),
+      postProgressMessage: (content) => sendDiscordEditableText(thread, content),
       syncStatusReaction: createDiscordStatusReactionSyncer(message)
     });
   }
@@ -601,6 +608,7 @@ class DiscordBotWorker {
       deferReply: async () => undefined,
       startTyping: () => startDiscordTyping(thread),
       followUp: (content) => sendDiscordText(thread, content),
+      postProgressMessage: (content) => sendDiscordEditableText(thread, content),
       syncStatusReaction: createDiscordStatusReactionSyncer(message)
     });
   }

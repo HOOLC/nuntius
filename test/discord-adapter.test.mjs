@@ -5,6 +5,8 @@ import { DiscordAdapter } from "../dist/adapters/discord.js";
 
 test("Discord heartbeats use typing instead of a progress message", async () => {
   const messages = [];
+  const progressMessages = [];
+  const progressEdits = [];
   const reactions = [];
   let deferReplyCount = 0;
   let startTypingCount = 0;
@@ -39,7 +41,8 @@ test("Discord heartbeats use typing instead of a progress message", async () => 
         createdAt: "2026-03-16T00:00:00.000Z",
         updatedAt: "2026-03-16T00:00:00.000Z"
       });
-      await publisher.publishProgress(turn, "Codex updated `README.md`.");
+      await publisher.publishProgress(turn, "1 command ran.");
+      await publisher.publishProgress(turn, "1 command ran, 2 file changes.");
       await publisher.publishCompleted(turn, {
         text: "Finished.",
         truncated: false
@@ -67,6 +70,14 @@ test("Discord heartbeats use typing instead of a progress message", async () => 
     followUp: async (message) => {
       messages.push(message);
     },
+    postProgressMessage: async (message) => {
+      progressMessages.push(message);
+      return {
+        async edit(content) {
+          progressEdits.push(content);
+        }
+      };
+    },
     syncStatusReaction: async (status) => {
       reactions.push(status);
     }
@@ -74,9 +85,10 @@ test("Discord heartbeats use typing instead of a progress message", async () => 
 
   assert.deepEqual(messages, [
     "**Queued**\n> Waiting for the active Codex turn in this conversation.",
-    "Codex updated `README.md`.",
     "Finished."
   ]);
+  assert.deepEqual(progressMessages, ["1 command ran."]);
+  assert.deepEqual(progressEdits, ["1 command ran, 2 file changes."]);
   assert.deepEqual(reactions, ["queued", "working", "finished"]);
 });
 
@@ -112,5 +124,46 @@ test("Discord adapter localizes queued and truncated system messages in Chinese"
   assert.deepEqual(messages, [
     "**已排队**\n> 当前会话已有进行中的 Codex turn，正在等待。",
     "已完成。\n\n_回复因 Discord 投递限制已被截断。_"
+  ]);
+});
+
+test("Discord adapter rewrites markdown links into readable text", async () => {
+  const messages = [];
+
+  const adapter = new DiscordAdapter({
+    async handleTurn(turn, publisher) {
+      await publisher.publishProgress(
+        turn,
+        [
+          "Touched [src/adapters/discord.ts](/home/nomofu/nuntius/src/adapters/discord.ts#L19).",
+          "See [design doc](https://example.com/design).",
+          "```md",
+          "[leave-this](https://example.com/code)",
+          "```"
+        ].join("\n")
+      );
+    }
+  });
+
+  await adapter.handleTurn({
+    workspaceId: "discord:workspace",
+    channelId: "thread-1",
+    scope: "thread",
+    userId: "user-1",
+    text: "format this",
+    deferReply: async () => undefined,
+    followUp: async (message) => {
+      messages.push(message);
+    }
+  });
+
+  assert.deepEqual(messages, [
+    [
+      "Touched src/adapters/discord.ts:19.",
+      "See design doc <https://example.com/design>.",
+      "```md",
+      "[leave-this](https://example.com/code)",
+      "```"
+    ].join("\n")
   ]);
 });

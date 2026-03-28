@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DISCORD_MESSAGE_LIMIT,
+  sendDiscordEditableText,
   sendDiscordInteractionResponse,
   splitDiscordMessage
 } from "../dist/discord-delivery.js";
@@ -102,6 +103,41 @@ test("sendDiscordInteractionResponse replies ephemerally before using follow-ups
       ephemeral: true
     }))
   );
+});
+
+test("sendDiscordEditableText only returns an editable handle for single-chunk content", async () => {
+  const shortSends = [];
+  const longSends = [];
+  const editableMessage = {
+    async edit() {
+      return undefined;
+    }
+  };
+
+  const shortHandle = await sendDiscordEditableText(
+    {
+      async send(content) {
+        shortSends.push(content);
+        return editableMessage;
+      }
+    },
+    "1 command ran."
+  );
+  const longContent = buildLongProse();
+  const longHandle = await sendDiscordEditableText(
+    {
+      async send(content) {
+        longSends.push(content);
+        return editableMessage;
+      }
+    },
+    longContent
+  );
+
+  assert.equal(shortHandle, editableMessage);
+  assert.deepEqual(shortSends, ["1 command ran."]);
+  assert.equal(longHandle, undefined);
+  assert.deepEqual(longSends, splitDiscordMessage(longContent));
 });
 
 function buildLongProse() {
