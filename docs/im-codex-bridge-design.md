@@ -67,6 +67,7 @@ Responsibilities:
 - run tests
 - perform reviews
 - answer repo-specific technical questions
+- optionally ask the bridge to wake the same worker session up later for waiting or monitoring work
 
 The worker is bound to one configured repository target at a time.
 
@@ -94,6 +95,7 @@ One chat thread maps to:
 - zero or one handler Codex session
 - zero or one active repository binding
 - zero or one active worker Codex session for that binding
+- zero or one pending worker wake-up request for that binding
 
 That means:
 
@@ -193,6 +195,12 @@ type ConversationBinding = {
     sandboxMode: "read-only" | "workspace-write" | "danger-full-access";
     model?: string;
     workerSessionId?: string;
+    pendingWakeRequest?: {
+      id: string;
+      requestedAt: string;
+      dueAt: string;
+      durationMs: number;
+    };
     updatedAt: string;
   };
   createdByUserId: string;
@@ -207,6 +215,23 @@ Important rules:
 - `handlerSessionId` is only used while the thread is unbound
 - `workerSessionId` is valid only for the active repository binding
 - changing repositories clears the old `workerSessionId`
+- a pending worker wake-up request is tied to the current worker session and is cleared by explicit user worker turns, resets, or repository changes
+
+## Worker Wake-Up Action
+
+Repo-scoped worker replies can ask the bridge to wake the same session up later by including:
+
+```text
+[[ACTION:WAKE_AFTER(5m)]]
+```
+
+Rules:
+
+- action tags are stripped before any visible reply is sent back to the user
+- use `30s`, `5m`, `2h`, or `1d` style delays
+- this is intended for waiting, polling, or monitoring work where the agent needs time to pass before continuing
+- when the timer expires, nuntius resumes the same worker session with an internal wake-up prompt
+- wake-up turns run in the background and do not automatically post their plain-text reply back into chat
 
 ## Handler Protocol
 

@@ -195,6 +195,160 @@ test("worker turns expose attachment paths and return changed docx files", async
   ]);
 });
 
+test("worker wake actions schedule a background wake-up turn and strip the action tag from visible replies", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-wake-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const sessionStore = new FileSessionStore(path.join(root, "sessions.json"));
+  const calls = [];
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    sessionStore,
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push({
+          prompt: request.prompt,
+          sessionId: request.sessionId
+        });
+
+        if (calls.length === 1) {
+          return {
+            sessionId: "worker-session-1",
+            responseText: [
+              "Waiting for the deployment window.",
+              "",
+              "[[ACTION:WAKE_AFTER(5m)]]"
+            ].join("\n"),
+            rawEvents: [],
+            stderrLines: []
+          };
+        }
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: "The wake-up check is complete.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("wait for the deployment window");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(publisher.completed, ["Waiting for the deployment window."]);
+
+  let status = await service.getConversationStatus(turn);
+  assert.equal(status.binding?.activeRepository?.pendingWakeRequest?.durationMs, 300_000);
+
+  await sessionStore.upsert({
+    ...status.binding,
+    activeRepository: {
+      ...status.binding.activeRepository,
+      pendingWakeRequest: {
+        ...status.binding.activeRepository.pendingWakeRequest,
+        dueAt: "2026-03-15T23:59:00.000Z"
+      }
+    }
+  });
+
+  const completedCount = await service.runDueWakeRequests({
+    maxConversations: 1
+  });
+
+  assert.equal(completedCount, 1);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].sessionId, "worker-session-1");
+  assert.match(calls[1].prompt, /timer you requested for this worker session has elapsed/i);
+
+  status = await service.getConversationStatus(turn);
+  assert.equal(status.binding?.activeRepository?.pendingWakeRequest, undefined);
+  assert.equal(status.binding?.activeRepository?.workerSessionId, "worker-session-1");
+});
+
+test("new user worker turns clear pending wake requests before running", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-wake-clear-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        if (!request.sessionId) {
+          return {
+            sessionId: "worker-session-1",
+            responseText: "Monitoring the rollout.\n[[ACTION:WAKE_AFTER(5m)]]",
+            rawEvents: [],
+            stderrLines: []
+          };
+        }
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: "Continuing immediately on the live worker session.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("monitor the rollout");
+  await service.bindConversation(turn, "repo");
+  await service.handleTurn(turn, createPublisher());
+
+  let status = await service.getConversationStatus(turn);
+  assert.equal(Boolean(status.binding?.activeRepository?.pendingWakeRequest), true);
+
+  const followUpPublisher = createPublisher();
+  await service.handleTurn(buildTurn("continue now"), followUpPublisher);
+
+  assert.deepEqual(followUpPublisher.completed, [
+    "Continuing immediately on the live worker session."
+  ]);
+
+  status = await service.getConversationStatus(turn);
+  assert.equal(status.binding?.activeRepository?.pendingWakeRequest, undefined);
+
+  const completedCount = await service.runDueWakeRequests({
+    maxConversations: 1
+  });
+  assert.equal(completedCount, 0);
+});
+
 test("explicit rebinding clears the old worker session and routes later turns to the new repo", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-rebind-"));
   t.after(() => {

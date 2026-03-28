@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -38,6 +39,7 @@ import {
   buildResetMessage,
   buildWorkerPrompt,
   buildWorkerReply,
+  clearPendingWorkerWakeRequest,
   clipMessage,
   createConversationBinding,
   handlerSessionConfigsEqual,
@@ -70,6 +72,11 @@ import {
 import type { SessionStore } from "./session-store.js";
 import type { TurnPublisher } from "./turn-publisher.js";
 import { sanitizeUserFacingText } from "./user-facing-text.js";
+import {
+  WAKE_AFTER_ACTION_USAGE,
+  formatWakeDuration,
+  parseWorkerDecision
+} from "./worker-protocol.js";
 
 const SCHEDULED_TASK_EXECUTION_LEASE_MS = 10 * 60_000;
 const SCHEDULED_TASK_LEASE_RENEW_MS = 60_000;
@@ -118,6 +125,7 @@ class InterruptedConversationTurnError extends Error {
 
 export class CodexBridgeService {
   private readonly activeTurns = new Map<string, ActiveTurnState>();
+  private readonly queuedWakeRuns = new Set<string>();
   private readonly scheduledTaskStore: FileScheduledTaskStore;
 
   constructor(
@@ -307,7 +315,9 @@ export class CodexBridgeService {
         );
       const refreshed = this.refreshHandlerSessionBinding(existing);
       const repository = this.resolveRepository(turn, repositoryId);
-      const binding = bindRepository(refreshed, repository, turn.userId);
+      const binding = clearPendingWorkerWakeRequest(
+        bindRepository(refreshed, repository, turn.userId)
+      );
 
       await this.sessionStore.upsert(binding);
       return binding;
@@ -366,6 +376,51 @@ export class CodexBridgeService {
     }
 
     return completedTasks;
+  }
+
+  async runDueWakeRequests(input: {
+    maxConversations?: number;
+  } = {}): Promise<number> {
+    const maxConversations = input.maxConversations ?? Number.POSITIVE_INFINITY;
+    const now = Date.now();
+    const bindings = (await this.sessionStore.list())
+      .filter((binding) => {
+        const dueAt = binding.activeRepository?.pendingWakeRequest?.dueAt;
+        return typeof dueAt === "string" && Date.parse(dueAt) <= now;
+      })
+      .sort((left, right) => {
+        const leftDueAt = Date.parse(left.activeRepository?.pendingWakeRequest?.dueAt ?? "");
+        const rightDueAt = Date.parse(right.activeRepository?.pendingWakeRequest?.dueAt ?? "");
+        return leftDueAt - rightDueAt;
+      });
+
+    let completedConversations = 0;
+
+    for (const binding of bindings) {
+      if (completedConversations >= maxConversations) {
+        break;
+      }
+
+      const wakeRequest = binding.activeRepository?.pendingWakeRequest;
+      const conversationId = conversationKeyToId(binding.key);
+      if (!wakeRequest || this.queuedWakeRuns.has(conversationId)) {
+        continue;
+      }
+
+      this.queuedWakeRuns.add(conversationId);
+      try {
+        const completed = await this.queue.run(conversationId, async () =>
+          this.runQueuedWakeRequest(binding.key, wakeRequest.id)
+        );
+        if (completed) {
+          completedConversations += 1;
+        }
+      } finally {
+        this.queuedWakeRuns.delete(conversationId);
+      }
+    }
+
+    return completedConversations;
   }
 
   async interruptConversation(turn: InboundTurn): Promise<InterruptConversationResult> {
@@ -473,7 +528,9 @@ export class CodexBridgeService {
       switch (action.action) {
         case "bind_repo": {
           const repository = this.resolveRepository(turn, action.repositoryId);
-          nextBinding = bindRepository(nextBinding, repository, turn.userId);
+          nextBinding = clearPendingWorkerWakeRequest(
+            bindRepository(nextBinding, repository, turn.userId)
+          );
           break;
         }
         case "delegate": {
@@ -593,7 +650,9 @@ export class CodexBridgeService {
     publisher: TurnPublisher,
     note?: string
   ): Promise<{ binding: ConversationBinding; finalMessage: OutboundMessage }> {
-    const currentBinding = this.refreshActiveRepositoryBinding(turn, binding);
+    const currentBinding = clearPendingWorkerWakeRequest(
+      this.refreshActiveRepositoryBinding(turn, binding)
+    );
     await this.sessionStore.upsert(currentBinding);
 
     return this.runWithActiveTurn(
@@ -618,16 +677,30 @@ export class CodexBridgeService {
           signal
         );
 
+        const language = currentBinding.language ?? resolveConversationLanguage({ text: turn.text });
+        const wakeRequest = workerResult.binding.activeRepository?.pendingWakeRequest;
+        const visibleReply =
+          workerResult.output.trim() ||
+          (wakeRequest
+            ? localize(language, {
+                en: `I'll wake this worker session up again in ${formatWakeDuration(
+                  wakeRequest.durationMs,
+                  language
+                )}.`,
+                zh: `我会在 ${formatWakeDuration(
+                  wakeRequest.durationMs,
+                  language
+                )}后再次唤醒这个 worker session。`
+              })
+            : buildWorkerReply(workerResult.output, language));
+
         return {
           binding: workerResult.binding,
           finalMessage: clipMessage(
-            buildWorkerReply(
-              workerResult.output,
-              currentBinding.language ?? resolveConversationLanguage({ text: turn.text })
-            ),
+            visibleReply,
             this.config.maxResponseChars,
             workerResult.returnedFiles,
-            currentBinding.language ?? resolveConversationLanguage({ text: turn.text })
+            language
           )
         };
       }
@@ -1033,18 +1106,11 @@ export class CodexBridgeService {
     }
 
     const documentFilesAfter = await captureTrackedDocumentFiles(turn.attachments);
+    const workerDecision = parseWorkerDecision(result.responseText);
 
     return {
-      binding: {
-        ...binding,
-        activeRepository: {
-          ...worker,
-          workerSessionId: result.sessionId ?? worker.workerSessionId,
-          updatedAt: new Date().toISOString()
-        },
-        updatedAt: new Date().toISOString()
-      },
-      output: result.responseText,
+      binding: this.buildWorkerResultBinding(binding, worker, result.sessionId, workerDecision),
+      output: workerDecision.message ?? "",
       returnedFiles: diffTrackedDocumentFiles(documentFilesBefore, documentFilesAfter)
     };
   }
@@ -1408,10 +1474,160 @@ export class CodexBridgeService {
       ...binding,
       activeRepository: {
         ...binding.activeRepository,
+        pendingWakeRequest: undefined,
         workerSessionId: sessionId ?? binding.activeRepository.workerSessionId,
         updatedAt: now
       },
       updatedAt: now
     };
   }
+
+  private async runQueuedWakeRequest(
+    conversationKey: ConversationBinding["key"],
+    wakeRequestId: string
+  ): Promise<boolean> {
+    const current = await this.sessionStore.get(conversationKey);
+    const wakeRequest = current?.activeRepository?.pendingWakeRequest;
+    if (!current || !wakeRequest || wakeRequest.id !== wakeRequestId) {
+      return false;
+    }
+
+    if (Date.parse(wakeRequest.dueAt) > Date.now()) {
+      return false;
+    }
+
+    const clearedBinding = clearPendingWorkerWakeRequest(current);
+    await this.sessionStore.upsert(clearedBinding);
+
+    try {
+      await this.executeWakeRequest(clearedBinding, wakeRequest);
+    } catch (error) {
+      const conversationId = conversationKeyToId(conversationKey);
+      const message = error instanceof Error ? error.stack ?? error.message : String(error);
+      console.error(`Worker wake-up for "${conversationId}" failed: ${message}`);
+    }
+
+    return true;
+  }
+
+  private async executeWakeRequest(
+    binding: ConversationBinding,
+    wakeRequest: NonNullable<RepositoryBinding["pendingWakeRequest"]>
+  ): Promise<void> {
+    if (!binding.activeRepository) {
+      return;
+    }
+
+    const turn = this.buildWakeTurn(binding);
+    const language = binding.language ?? resolveConversationLanguage({ text: turn.text });
+    const outcome = await this.completeWorkerTurn(
+      turn,
+      binding,
+      this.buildWakePrompt(wakeRequest, language),
+      NOOP_TURN_PUBLISHER,
+      localize(language, {
+        en: `Background wake-up after ${formatWakeDuration(wakeRequest.durationMs, language)}.`,
+        zh: `${formatWakeDuration(wakeRequest.durationMs, language)}后的后台唤醒。`
+      })
+    );
+    await this.sessionStore.upsert(outcome.binding);
+  }
+
+  private buildWakeTurn(binding: ConversationBinding): InboundTurn {
+    return {
+      platform: binding.key.platform,
+      workspaceId: binding.key.workspaceId,
+      channelId: binding.key.channelId,
+      threadId: binding.key.threadId,
+      userId: binding.activeRepository?.boundByUserId ?? binding.createdByUserId,
+      userDisplayName: "nuntius wake scheduler",
+      scope: binding.key.threadId ? "thread" : "channel",
+      text: "[nuntius internal wake-up]",
+      attachments: binding.attachments ?? [],
+      repositoryId: binding.activeRepository?.repositoryId,
+      receivedAt: new Date().toISOString()
+    };
+  }
+
+  private buildWakePrompt(
+    wakeRequest: NonNullable<RepositoryBinding["pendingWakeRequest"]>,
+    language: ConversationLanguage
+  ): string {
+    return [
+      localize(language, {
+        en: "System wake-up: the timer you requested for this worker session has elapsed.",
+        zh: "系统唤醒：你为这个 worker session 请求的定时器已经到期。"
+      }),
+      localize(language, {
+        en: `Requested delay: ${formatWakeDuration(wakeRequest.durationMs, language)}.`,
+        zh: `请求的延迟：${formatWakeDuration(wakeRequest.durationMs, language)}。`
+      }),
+      localize(language, {
+        en: `Requested at: ${wakeRequest.requestedAt}.`,
+        zh: `请求时间：${wakeRequest.requestedAt}。`
+      }),
+      localize(language, {
+        en: `Wake time: ${wakeRequest.dueAt}.`,
+        zh: `唤醒时间：${wakeRequest.dueAt}。`
+      }),
+      "",
+      localize(language, {
+        en: "Continue the waiting, polling, or monitoring task from this session now.",
+        zh: "现在继续这个 session 里的等待、轮询或监控任务。"
+      }),
+      localize(language, {
+        en: `If you still need more time, include ${WAKE_AFTER_ACTION_USAGE} in your reply.`,
+        zh: `如果还需要更多时间，请在回复里加入 ${WAKE_AFTER_ACTION_USAGE}。`
+      }),
+      localize(language, {
+        en: "This is a background wake-up turn. Its plain-text reply is not automatically posted back to chat.",
+        zh: "这是一次后台唤醒 turn。它的普通文本回复不会自动发回聊天。"
+      })
+    ].join("\n");
+  }
+
+  private buildWorkerResultBinding(
+    binding: ConversationBinding,
+    worker: RepositoryBinding,
+    sessionId: string | undefined,
+    decision: ReturnType<typeof parseWorkerDecision>
+  ): ConversationBinding {
+    const wakeAction = [...decision.actions]
+      .reverse()
+      .find((action) => action.action === "wake_after");
+    const now = new Date();
+    const workerSessionId = sessionId ?? worker.workerSessionId;
+    const nowIso = now.toISOString();
+
+    if (wakeAction && !workerSessionId) {
+      throw new Error("WAKE_AFTER requires an active worker session id.");
+    }
+
+    return {
+      ...binding,
+      activeRepository: {
+        ...worker,
+        workerSessionId,
+        pendingWakeRequest: wakeAction
+          ? {
+              id: randomUUID(),
+              requestedAt: nowIso,
+              dueAt: new Date(now.getTime() + wakeAction.durationMs).toISOString(),
+              durationMs: wakeAction.durationMs
+            }
+          : undefined,
+        updatedAt: nowIso
+      },
+      updatedAt: nowIso
+    };
+  }
 }
+
+const NOOP_TURN_PUBLISHER: TurnPublisher = {
+  async publishQueued() {},
+  async publishStarted() {},
+  async publishProgress() {},
+  async publishCompleted() {},
+  async publishInterrupted() {},
+  async publishFailed() {}
+};

@@ -17,6 +17,7 @@ import type {
 } from "./domain.js";
 import { toConversationKey } from "./domain.js";
 import { sanitizeUserFacingText } from "./user-facing-text.js";
+import { WAKE_AFTER_ACTION_USAGE } from "./worker-protocol.js";
 
 const HANDLER_SESSION_CONFIG_VERSION = 2;
 
@@ -138,6 +139,7 @@ export function resetBinding(
       activeRepository: binding.activeRepository
         ? {
             ...binding.activeRepository,
+            pendingWakeRequest: undefined,
             workerSessionId: undefined,
             updatedAt: now
           }
@@ -151,6 +153,7 @@ export function resetBinding(
     activeRepository: binding.activeRepository
       ? {
           ...binding.activeRepository,
+          pendingWakeRequest: undefined,
           workerSessionId: undefined,
           updatedAt: now
         }
@@ -252,6 +255,17 @@ export function buildWorkerPrompt(
     );
   }
 
+  lines.push(
+    "Bridge action tags available in worker replies:",
+    `- ${WAKE_AFTER_ACTION_USAGE}`,
+    "- Use WAKE_AFTER only when the task genuinely requires time to pass before you continue.",
+    "- Keep a short plain-text status update beside the action tag when replying to the user.",
+    "- Action tags are stripped from the user-visible reply.",
+    "- When the timer fires, nuntius resumes this same worker session in the background with a wake-up prompt.",
+    "- Background wake-up turns are not automatically posted back to chat, so use them for waiting, polling, monitoring, and follow-up work.",
+    ""
+  );
+
   lines.push("User task:");
   lines.push(workerPrompt.trim() || "(The user sent attachments with no additional text.)");
 
@@ -312,6 +326,23 @@ export function buildEffectiveTurn(
   };
 }
 
+export function clearPendingWorkerWakeRequest(binding: ConversationBinding): ConversationBinding {
+  if (!binding.activeRepository?.pendingWakeRequest) {
+    return binding;
+  }
+
+  const now = new Date().toISOString();
+  return {
+    ...binding,
+    activeRepository: {
+      ...binding.activeRepository,
+      pendingWakeRequest: undefined,
+      updatedAt: now
+    },
+    updatedAt: now
+  };
+}
+
 function deriveRepositoryBinding(
   previous: RepositoryBinding | undefined,
   repository: RepositoryTarget,
@@ -320,6 +351,12 @@ function deriveRepositoryBinding(
   preserveLegacyBoundByUserId = false
 ): RepositoryBinding {
   const sandboxMode = repository.sandboxMode;
+  const reuseWorkerSession = shouldReuseWorkerSession(
+    previous,
+    repository,
+    boundByUserId,
+    preserveLegacyBoundByUserId
+  );
 
   return {
     repositoryId: repository.id,
@@ -331,14 +368,8 @@ function deriveRepositoryBinding(
     codexConfigOverrides: repository.codexConfigOverrides ?? [],
     allowCodexNetworkAccess: Boolean(repository.allowCodexNetworkAccess),
     codexNetworkAccessWorkspacePath: repository.codexNetworkAccessWorkspacePath,
-    workerSessionId: shouldReuseWorkerSession(
-      previous,
-      repository,
-      boundByUserId,
-      preserveLegacyBoundByUserId
-    )
-      ? previous?.workerSessionId
-      : undefined,
+    workerSessionId: reuseWorkerSession ? previous?.workerSessionId : undefined,
+    pendingWakeRequest: reuseWorkerSession ? previous?.pendingWakeRequest : undefined,
     updatedAt
   };
 }
@@ -387,6 +418,10 @@ function repositoryBindingsEquivalent(
     Boolean(left?.allowCodexNetworkAccess) === Boolean(right?.allowCodexNetworkAccess) &&
     left?.codexNetworkAccessWorkspacePath === right?.codexNetworkAccessWorkspacePath &&
     left?.workerSessionId === right?.workerSessionId &&
+    left?.pendingWakeRequest?.id === right?.pendingWakeRequest?.id &&
+    left?.pendingWakeRequest?.requestedAt === right?.pendingWakeRequest?.requestedAt &&
+    left?.pendingWakeRequest?.dueAt === right?.pendingWakeRequest?.dueAt &&
+    left?.pendingWakeRequest?.durationMs === right?.pendingWakeRequest?.durationMs &&
     arraysEqual(left?.codexConfigOverrides, right?.codexConfigOverrides)
   );
 }

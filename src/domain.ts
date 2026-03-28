@@ -46,7 +46,15 @@ export interface RepositoryBinding {
   allowCodexNetworkAccess?: boolean;
   codexNetworkAccessWorkspacePath?: string;
   workerSessionId?: string;
+  pendingWakeRequest?: WorkerWakeRequest;
   updatedAt: string;
+}
+
+export interface WorkerWakeRequest {
+  id: string;
+  requestedAt: string;
+  dueAt: string;
+  durationMs: number;
 }
 
 export interface HandlerSessionBinding {

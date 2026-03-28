@@ -283,6 +283,12 @@ function formatStatus(status: ConversationStatus, language: ConversationLanguage
   );
   lines.push(
     localize(language, {
+      en: `- Pending wake: ${formatPendingWake(status, language)}`,
+      zh: `- 待执行唤醒：${formatPendingWake(status, language)}`
+    })
+  );
+  lines.push(
+    localize(language, {
       en: `- Plain-text routing: ${
         status.binding.activeRepository ? "direct to the bound worker session" : "through the handler session"
       }`,
@@ -310,6 +316,24 @@ function formatRepositories(status: ConversationStatus, language: ConversationLa
   return localize(language, {
     en: `Available repositories: ${formatAvailableRepos(status, language)}`,
     zh: `可用仓库：${formatAvailableRepos(status, language)}`
+  });
+}
+
+function formatPendingWake(
+  status: ConversationStatus,
+  language: ConversationLanguage
+): string {
+  const wakeRequest = status.binding?.activeRepository?.pendingWakeRequest;
+  if (!wakeRequest) {
+    return localize(language, {
+      en: "none",
+      zh: "无"
+    });
+  }
+
+  return localize(language, {
+    en: `${wakeRequest.dueAt} (after ${wakeRequest.durationMs / 1_000}s)`,
+    zh: `${wakeRequest.dueAt}（${wakeRequest.durationMs / 1_000} 秒后）`
   });
 }
 

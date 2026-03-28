@@ -5,6 +5,7 @@ import { ScheduledTaskScheduler } from "./scheduled-task-scheduler.js";
 import { SerialTurnQueue } from "./serial-turn-queue.js";
 import { CodexBridgeService, type SessionReconciliationResult } from "./service.js";
 import { FileSessionStore } from "./session-store.js";
+import { WorkerWakeScheduler } from "./worker-wake-scheduler.js";
 
 export interface RepositoryRegistrySnapshot {
   defaultRepositoryId: string;
@@ -36,6 +37,7 @@ export function createBridgeRuntime(config: BridgeConfig = loadConfig()): Bridge
   const bridge = new CodexBridgeService(config, sessionStore, queue, runner);
   const router = new InteractionRouter(bridge);
   const scheduledTaskScheduler = new ScheduledTaskScheduler(bridge);
+  const workerWakeScheduler = new WorkerWakeScheduler(bridge);
 
   return {
     config,
@@ -53,9 +55,11 @@ export function createBridgeRuntime(config: BridgeConfig = loadConfig()): Bridge
     reconcileSessionBindings: () => bridge.reconcileSessionBindings(),
     startBackgroundServices: () => {
       scheduledTaskScheduler.start();
+      workerWakeScheduler.start();
     },
     stopBackgroundServices: () => {
       scheduledTaskScheduler.stop();
+      workerWakeScheduler.stop();
     }
   };
 }
