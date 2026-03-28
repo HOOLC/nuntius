@@ -123,6 +123,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - `/codex bind <repo-id>` creates a thread if needed and binds it
 - `/codex status`
 - `/codex repos`
+- `/codex tasks`
 - `/codex reset [worker|binding|all]`
 - `/codex interrupt`
 - `/codex help`
@@ -148,6 +149,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - Slash-command ask/bind in a normal channel creates a dedicated Slack thread starter message first.
 - Channel mentions start Codex inside a thread rooted on the user's message.
 - Once a thread is bound to a repo, later replies in that thread go straight to the bound worker session until `/codex bind` or `/codex reset` changes the state.
+- In an unbound top-level conversation, plain text like `create a task running per hour in arbitero` lets the handler create a scheduled background task under `.nuntius/scheduled-tasks/<task-id>/` for that repository without binding the thread.
 - nuntius adds status reactions to inbound Slack messages when a concrete source message exists; slash commands keep their normal ephemeral acknowledgements.
 - With the default `bridge.progress_updates = "minimal"`, Slack keeps intermediate worker replies sparse while reactions on the inbound message show queued/working/finished state.
 - `reloadconfig` reloads the bridge config and repository registry in-process.

@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { localize, resolveConversationLanguage } from "./conversation-language.js";
 import { formatCodexNetworkAccess as formatCodexNetworkAccessLabel } from "./codex-network-access.js";
 import type { ConversationLanguage, InboundTurn } from "./domain.js";
@@ -17,6 +19,9 @@ export type BridgeCommand =
     }
   | {
       kind: "repos";
+    }
+  | {
+      kind: "tasks";
     }
   | {
       kind: "bind";
@@ -72,6 +77,18 @@ export class InteractionRouter {
         });
         await publisher.publishCompleted(turn, {
           text: formatRepositories(status, language)
+        }, language);
+        return;
+      }
+      case "tasks": {
+        const status = await this.bridge.getConversationStatus(turn);
+        const language = resolveConversationLanguage({
+          binding: status.binding,
+          text: turn.text
+        });
+        const tasks = await this.bridge.listScheduledTasks(turn);
+        await publisher.publishCompleted(turn, {
+          text: formatScheduledTasks(tasks, language)
         }, language);
         return;
       }
@@ -141,6 +158,10 @@ export function parseBridgeCommand(text: string): BridgeCommand {
       return {
         kind: "repos"
       };
+    case "tasks":
+      return {
+        kind: "tasks"
+      };
     case "bind":
       if (tail[0]) {
         return {
@@ -186,6 +207,7 @@ function buildHelpMessage(language: ConversationLanguage): string {
     }),
     "/codex status",
     "/codex repos",
+    "/codex tasks",
     "/codex bind <repo-id>",
     "/codex reset [worker|binding|context|all]",
     localize(language, {
@@ -199,6 +221,10 @@ function buildHelpMessage(language: ConversationLanguage): string {
     localize(language, {
       en: "/codex <message>  -> if a repo is bound, send it straight to that worker; otherwise send it to the handler",
       zh: "/codex <message>  -> 若已绑定仓库则直接发送给 worker，否则发送给 handler"
+    }),
+    localize(language, {
+      en: 'top-level handler chat can create scheduled tasks, for example: "create a task running per hour in arbitero"',
+      zh: '顶层 handler 会话也可以创建定时任务，例如："create a task running per hour in arbitero"'
     }),
     localize(language, {
       en: "plain text         -> follows the same route inside an existing conversation",
@@ -285,6 +311,45 @@ function formatRepositories(status: ConversationStatus, language: ConversationLa
     en: `Available repositories: ${formatAvailableRepos(status, language)}`,
     zh: `可用仓库：${formatAvailableRepos(status, language)}`
   });
+}
+
+function formatScheduledTasks(
+  tasks: Array<{
+    id: string;
+    repositoryId: string;
+    state: string;
+    scheduleDescription: string;
+    nextRunAt?: string;
+    taskDir: string;
+    repositoryPath: string;
+  }>,
+  language: ConversationLanguage
+): string {
+  if (tasks.length === 0) {
+    return localize(language, {
+      en: "Scheduled tasks: none",
+      zh: "定时任务：无"
+    });
+  }
+
+  const lines = [
+    localize(language, {
+      en: "Scheduled tasks:",
+      zh: "定时任务："
+    })
+  ];
+
+  for (const task of tasks) {
+    const relativeTaskDir = path.relative(task.repositoryPath, task.taskDir) || ".";
+    lines.push(
+      localize(language, {
+        en: `- ${task.id} [${task.state}] repo=${task.repositoryId} schedule=${task.scheduleDescription} next=${task.nextRunAt ?? "stopped"} docs=${relativeTaskDir || "."}`,
+        zh: `- ${task.id} [${task.state}] 仓库=${task.repositoryId} 频率=${task.scheduleDescription} 下次执行=${task.nextRunAt ?? "已停止"} 文档=${relativeTaskDir || "."}`
+      })
+    );
+  }
+
+  return lines.join("\n");
 }
 
 function formatAvailableRepos(status: ConversationStatus, language: ConversationLanguage): string {

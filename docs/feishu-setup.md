@@ -110,6 +110,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - `/codex bind <repo-id>`
 - `/codex status`
 - `/codex repos`
+- `/codex tasks`
 - `/codex reset [worker|binding|context|all]`
 - `/codex interrupt`
 - `/codex help`
@@ -141,6 +142,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - If `feishu.admin_open_ids` is set, only those users can run `/codexadmin`.
 - Root group messages only trigger the bot when they start with `/codex` or mention the bot.
 - Persistent work in a group is moved into a Feishu thread automatically; later replies in that thread reuse the same bound worker session.
+- In an unbound top-level conversation, plain text like `create a task running per hour in arbitero` lets the handler create a scheduled background task under `.nuntius/scheduled-tasks/<task-id>/` for that repository without binding the thread.
 - nuntius adds status reactions to inbound Feishu messages when the bot can address the source message directly.
 - File attachments received in a conversation remain available to later turns in that conversation unless you clear the binding with `/codex reset binding` or `/codex reset all`.
 - `/codexadmin reloadconfig` reloads the bridge config and repository registry in-process.

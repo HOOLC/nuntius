@@ -9,6 +9,7 @@ The key design choice is:
 - the IM thread can start in a conversational handler session before any repository is bound
 - repo-scoped coding work runs in a separate worker Codex session bound to one repository target
 - once a thread is bound, later plain-text replies go straight to that worker session
+- the top-level handler session can also create scheduled worker tasks from conversational requests
 - bind/reset operations stay explicit so repository switching does not happen implicitly
 
 This still gives you a more natural chat UX than a command-only bridge. The user can say things like:
@@ -69,6 +70,23 @@ Responsibilities:
 
 The worker is bound to one configured repository target at a time.
 
+### 3. Scheduled Tasks
+
+Scheduled tasks are repo-scoped background worker jobs.
+
+Responsibilities:
+
+- accept a conversational request such as "create a task running per hour in arbitero"
+- create a dedicated task folder under `.nuntius/scheduled-tasks/<task-id>/` inside the target repository
+- ask Codex to turn the user request into two self-contained documents:
+  - `task.md`: requirement/description, execution plan, expected outputs, constraints, and termination condition
+  - `status.md`: current state plus an append-only execution log
+- run the task later in the background by launching a fresh Codex worker against the repository
+- rely on `task.md` and `status.md` as the only task-specific prompt for future executions
+
+The scheduler is process-local but uses a shared file-backed task store with leases so multiple bot
+processes can poll safely without double-running the same task.
+
 ## Thread Semantics
 
 One chat thread maps to:
@@ -81,6 +99,7 @@ That means:
 
 - the thread can be conversational even before a repo is chosen
 - once a repo is bound, later plain-text replies in that thread reuse the same worker session directly
+- scheduled tasks are created from the top-level handler session and later run in fresh background worker turns
 - switching repos is explicit and clears the old worker session
 
 ## Architecture
@@ -92,18 +111,23 @@ flowchart LR
     Feishu[Feishu Adapter]
     Queue[Per-Thread Queue]
     Store[(Conversation Store)]
+    TaskStore[(Scheduled Task Store)]
     Orchestrator[Bridge Orchestrator]
     Handler[Handler Codex Session]
     Worker[Worker Codex Session]
+    Scheduler[Background Scheduler]
 
     Slack --> Queue
     Discord --> Queue
     Feishu --> Queue
     Queue --> Orchestrator
     Orchestrator --> Store
+    Orchestrator --> TaskStore
     Orchestrator --> Handler
     Orchestrator --> Worker
     Worker --> Orchestrator
+    Scheduler --> TaskStore
+    Scheduler --> Worker
     Orchestrator --> Slack
     Orchestrator --> Discord
     Orchestrator --> Feishu
@@ -274,6 +298,7 @@ Example:
 Useful explicit commands:
 
 - `/codex status`
+- `/codex tasks`
 - `/codex reset`
 - `/codex bind nuntius`
 
@@ -313,9 +338,11 @@ Track:
 - `handler_session_id`
 - `repository_id`
 - `worker_session_id`
+- `scheduled_task_id`
 - queue wait
 - handler latency
 - worker latency
+- scheduled task execution latency
 - handler parse failures
 
 ### Failure Handling
@@ -325,6 +352,8 @@ Expected failure classes:
 - invalid handler JSON
 - repo access denied
 - worker failure
+- scheduled task planning failure
+- scheduled task execution failure
 - handler failure after worker completion
 - Slack or Discord postback failure
 

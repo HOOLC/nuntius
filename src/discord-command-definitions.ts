@@ -40,6 +40,9 @@ export function createDiscordCommandPayload(): RESTPostAPIChatInputApplicationCo
         subcommand.setName("repos").setDescription("List repositories available here")
       )
       .addSubcommand((subcommand) =>
+        subcommand.setName("tasks").setDescription("List scheduled tasks available here")
+      )
+      .addSubcommand((subcommand) =>
         subcommand
           .setName("reset")
           .setDescription("Reset conversation state")

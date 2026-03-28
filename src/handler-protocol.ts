@@ -9,6 +9,12 @@ export type HandlerControlAction =
       repositoryId: string;
     }
   | {
+      action: "schedule_task";
+      repositoryId: string;
+      schedule: string;
+      taskPrompt: string;
+    }
+  | {
       action: "delegate";
       workerPrompt: string;
     }
@@ -38,12 +44,13 @@ export function buildHandlerUserPrompt(input: {
   } = input;
   const lines = [
     "You are the handler Codex session for an IM bridge thread that is not currently routed straight to a bound worker session.",
-    "You decide whether to reply directly, bind a repository, or reset state before repo-scoped work continues in the bound worker session.",
+    "You decide whether to reply directly, create a scheduled task, bind a repository, or reset state before repo-scoped work continues in the bound worker session.",
     "Normal plain-text replies are allowed.",
     "If you need bridge control, include one or more action tags anywhere in your reply.",
     "",
     "Action tags:",
     "- [[ACTION:BIND(repo-id)]]",
+    '- [[ACTION:SCHEDULE({"repositoryId":"repo-id","schedule":"every 1 hour","taskPrompt":"check status"})]]',
     "- [[ACTION:DELEGATE(worker prompt)]]",
     "- [[ACTION:RESET(worker|binding|context|all)]]",
     "",
@@ -55,10 +62,13 @@ export function buildHandlerUserPrompt(input: {
     "- Do not silently switch repositories.",
     "- Repository switching stays explicit: use BIND before any work should move to a different repository.",
     "- Once a repository is bound, later plain-text thread replies bypass you and go straight to that worker session.",
+    "- Scheduled task creation is handled here in the top-level handler session; do not bind the thread just to create a scheduled task unless the user also wants live repo work in this thread.",
     "- If no repository is bound and the user asks for repo work, ask which repository to use unless it is already explicit.",
     '- Treat conversational control phrases like "work on <repo-id>", "switch to <repo-id>", or "bind this thread to <repo-id>" as explicit repository-binding requests.',
     '- When the user says "work on <repo-id>" without a concrete task, emit [[ACTION:BIND(repo-id)]] and keep the visible reply short. Do not invent repo work.',
     '- When the user explicitly names a repository and also wants immediate repo work, emit [[ACTION:BIND(repo-id)]] followed by [[ACTION:DELEGATE(worker prompt)]].',
+    '- When the user wants a recurring or scheduled background task, emit [[ACTION:SCHEDULE(...)]] with repositoryId, a canonical schedule string like "every 1 hour", and a concise taskPrompt.',
+    "- If the repository or schedule for a scheduled task request is ambiguous, ask a clarification question instead of guessing.",
     '- For conversational requests like "what repo is this bound to?", "what repos are available?", or "how do I use this?", answer with reply using the current state below instead of asking for more detail.',
     '- For conversational reset requests like "reset this thread", "clear context", or "start over", emit RESET with the closest matching scope.',
     "- Use reply for clarification, conversational answers, repo questions, and status-style answers.",
@@ -73,7 +83,8 @@ export function buildHandlerUserPrompt(input: {
     `- Handler session exists: ${String(Boolean(state.handlerSessionId))}`,
     `- Active repository: ${state.activeRepository?.repositoryId ?? "none"}`,
     `- Worker session exists: ${String(Boolean(state.activeRepository?.workerSessionId))}`,
-    `- Available repositories: ${formatRepositoryList(availableRepositories)}`,
+    "- Available repositories and settings:",
+    ...formatRepositoryCatalog(availableRepositories),
     "",
     "Latest user message:",
     turn.text || "(no text)",
@@ -154,6 +165,18 @@ function parseLegacyHandlerDecision(rawText: string): HandlerDecision | undefine
           actions
         };
       }
+      case "schedule_task":
+        return {
+          message: readOptionalString(parsed, "message"),
+          actions: [
+            {
+              action: "schedule_task",
+              repositoryId: readRequiredString(parsed, "repositoryId"),
+              schedule: readRequiredString(parsed, "schedule"),
+              taskPrompt: readRequiredString(parsed, "taskPrompt")
+            }
+          ]
+        };
       case "delegate":
         return {
           message: readOptionalString(parsed, "message"),
@@ -292,6 +315,23 @@ function parseTaggedAction(actionName: string, payload: string): HandlerControlA
         action: "delegate",
         workerPrompt: payload
       };
+    case "SCHEDULE": {
+      if (!payload) {
+        throw new Error("SCHEDULE action requires a JSON payload.");
+      }
+
+      const parsed = JSON.parse(payload) as unknown;
+      if (!isRecord(parsed)) {
+        throw new Error("SCHEDULE action payload must be an object.");
+      }
+
+      return {
+        action: "schedule_task",
+        repositoryId: readRequiredString(parsed, "repositoryId"),
+        schedule: readRequiredString(parsed, "schedule"),
+        taskPrompt: readRequiredString(parsed, "taskPrompt")
+      };
+    }
     case "RESET":
       return {
         action: "reset",
@@ -302,12 +342,14 @@ function parseTaggedAction(actionName: string, payload: string): HandlerControlA
   }
 }
 
-function formatRepositoryList(repositories: RepositoryTarget[]): string {
+function formatRepositoryCatalog(repositories: RepositoryTarget[]): string[] {
   if (repositories.length === 0) {
-    return "none";
+    return ["- none"];
   }
 
-  return repositories.map((repository) => repository.id).join(", ");
+  return repositories.map((repository) =>
+    `- ${repository.id} (sandbox=${repository.sandboxMode}, model=${repository.model ?? "default"}, codex_network_access=${repository.allowCodexNetworkAccess ? "enabled" : "disabled"})`
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

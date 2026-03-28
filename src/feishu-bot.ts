@@ -178,6 +178,7 @@ export class FeishuBot {
   async start(): Promise<void> {
     const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
     logSessionReconciliation("Feishu bot startup", sessionRefresh);
+    this.bridgeRuntime.startBackgroundServices();
     await this.refreshFeishuClient();
     this.installSignalHandlers();
     await this.connectLongConnection();
@@ -185,6 +186,8 @@ export class FeishuBot {
   }
 
   async stop(): Promise<void> {
+    this.bridgeRuntime.stopBackgroundServices();
+
     if (!this.longConnection) {
       return;
     }

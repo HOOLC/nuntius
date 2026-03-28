@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import path from "node:path";
 
 import {
   captureTrackedDocumentFiles,
@@ -49,9 +50,29 @@ import {
   touchBinding
 } from "./service-state.js";
 import type { SerialTurnQueue } from "./serial-turn-queue.js";
+import {
+  appendScheduledTaskStatusLog,
+  buildScheduledTaskExecutionPrompt,
+  buildScheduledTaskPaths,
+  buildScheduledTaskPlanningPrompt,
+  createScheduledTaskId,
+  parseScheduledTaskSchedule,
+  readScheduledTaskControlState,
+  scheduledTaskShouldStop,
+  updateScheduledTaskControlState,
+  writeScheduledTaskScaffold
+} from "./scheduled-task-documents.js";
+import {
+  deriveScheduledTaskStorePath,
+  FileScheduledTaskStore,
+  type ScheduledTaskRecord
+} from "./scheduled-task-store.js";
 import type { SessionStore } from "./session-store.js";
 import type { TurnPublisher } from "./turn-publisher.js";
 import { sanitizeUserFacingText } from "./user-facing-text.js";
+
+const SCHEDULED_TASK_EXECUTION_LEASE_MS = 10 * 60_000;
+const SCHEDULED_TASK_LEASE_RENEW_MS = 60_000;
 
 export interface ConversationStatus {
   binding?: ConversationBinding;
@@ -97,13 +118,18 @@ class InterruptedConversationTurnError extends Error {
 
 export class CodexBridgeService {
   private readonly activeTurns = new Map<string, ActiveTurnState>();
+  private readonly scheduledTaskStore: FileScheduledTaskStore;
 
   constructor(
     private readonly config: BridgeConfig,
     private readonly sessionStore: SessionStore,
     private readonly queue: SerialTurnQueue,
     private readonly runner: CodexRunner
-  ) {}
+  ) {
+    this.scheduledTaskStore = new FileScheduledTaskStore(
+      deriveScheduledTaskStorePath(config.sessionStorePath)
+    );
+  }
 
   async handleTurn(turn: InboundTurn, publisher: TurnPublisher): Promise<void> {
     const conversationKey = toConversationKey(turn);
@@ -295,6 +321,53 @@ export class CodexBridgeService {
     };
   }
 
+  async listScheduledTasks(turn: InboundTurn): Promise<ScheduledTaskRecord[]> {
+    const accessibleRepositories = new Set(
+      this.listAccessibleRepositories(turn).map((repository) => repository.id)
+    );
+
+    return (await this.scheduledTaskStore.list()).filter((task) =>
+      accessibleRepositories.has(task.repositoryId)
+    );
+  }
+
+  async runDueScheduledTasks(input: {
+    ownerId: string;
+    maxTasks?: number;
+  }): Promise<number> {
+    const maxTasks = input.maxTasks ?? Number.POSITIVE_INFINITY;
+    let completedTasks = 0;
+
+    while (completedTasks < maxTasks) {
+      const now = new Date().toISOString();
+      const executionId = createScheduledTaskId("execution");
+      const task = await this.scheduledTaskStore.claimDueTask({
+        ownerId: input.ownerId,
+        executionId,
+        now,
+        leaseMs: SCHEDULED_TASK_EXECUTION_LEASE_MS
+      });
+
+      if (!task) {
+        break;
+      }
+
+      try {
+        await this.executeScheduledTask(task, {
+          ownerId: input.ownerId,
+          executionId
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.stack ?? error.message : String(error);
+        console.error(`Scheduled task "${task.id}" failed: ${message}`);
+      }
+
+      completedTasks += 1;
+    }
+
+    return completedTasks;
+  }
+
   async interruptConversation(turn: InboundTurn): Promise<InterruptConversationResult> {
     const conversationId = conversationKeyToId(toConversationKey(turn));
     const activeTurn = this.activeTurns.get(conversationId);
@@ -424,6 +497,38 @@ export class CodexBridgeService {
             decision.message
           );
         }
+        case "schedule_task": {
+          const repository = this.resolveRepository(turn, action.repositoryId);
+          const parsedSchedule = parseScheduledTaskSchedule(action.schedule);
+          if (!parsedSchedule) {
+            return {
+              binding: touchBinding(nextBinding),
+              finalMessage: clipMessage(
+                localize(language, {
+                  en: `Unsupported scheduled-task cadence: ${action.schedule}.`,
+                  zh: `不支持的定时任务频率：${action.schedule}。`
+                }),
+                this.config.maxResponseChars,
+                undefined,
+                language
+              )
+            };
+          }
+
+          return this.createScheduledTask(
+            turn,
+            nextBinding,
+            repository,
+            {
+              rawRequest: turn.text,
+              taskSummary: action.taskPrompt,
+              scheduleDescription: parsedSchedule.scheduleDescription,
+              intervalMs: parsedSchedule.intervalMs
+            },
+            publisher,
+            decision.message
+          );
+        }
         case "reset":
           return {
             binding: resetBinding(nextBinding, action.scope),
@@ -529,6 +634,336 @@ export class CodexBridgeService {
     );
   }
 
+  private async createScheduledTask(
+    turn: InboundTurn,
+    binding: ConversationBinding,
+    repository: RepositoryTarget,
+    request: {
+      rawRequest: string;
+      taskSummary: string;
+      scheduleDescription: string;
+      intervalMs: number;
+    },
+    publisher: TurnPublisher,
+    note?: string
+  ): Promise<{ binding: ConversationBinding; finalMessage: OutboundMessage }> {
+    const executionBinding = bindRepository(
+      this.refreshHandlerSessionBinding(binding),
+      repository,
+      turn.userId
+    );
+    const worker = executionBinding.activeRepository;
+    const language = executionBinding.language ?? resolveConversationLanguage({ text: turn.text });
+
+    if (!worker) {
+      throw new Error("Scheduled task creation requires a repository binding snapshot.");
+    }
+
+    if (worker.sandboxMode === "read-only") {
+      throw new Error(
+        localize(language, {
+          en: "Scheduled tasks require a writable repository sandbox because the agent must maintain task documents.",
+          zh: "定时任务需要可写的仓库沙箱，因为 agent 需要持续维护任务文档。"
+        })
+      );
+    }
+
+    const createdAt = new Date();
+    const taskId = createScheduledTaskId(request.taskSummary, createdAt);
+    const taskPaths = buildScheduledTaskPaths(worker.repositoryPath, taskId);
+
+    await writeScheduledTaskScaffold({
+      taskId,
+      repositoryId: worker.repositoryId,
+      repositoryPath: worker.repositoryPath,
+      taskDir: taskPaths.taskDir,
+      taskDocumentPath: taskPaths.taskDocumentPath,
+      statusDocumentPath: taskPaths.statusDocumentPath,
+      rawRequest: request.rawRequest,
+      taskSummary: request.taskSummary,
+      scheduleDescription: request.scheduleDescription,
+      createdAt: createdAt.toISOString(),
+      createdByUserId: turn.userId,
+      sourceConversationId: conversationKeyToId(binding.key)
+    });
+
+    let taskCreated = false;
+
+    try {
+      return await this.runWithActiveTurn(
+        turn,
+        {
+          actor: "worker",
+          repositoryId: worker.repositoryId
+        },
+        async (signal) => {
+          await publisher.publishStarted(
+            turn,
+            executionBinding,
+            note ?? localize(language, {
+              en: "Planning scheduled task.",
+              zh: "正在规划定时任务。"
+            }),
+            language
+          );
+
+          const progress = new CodexRunProgressReporter(turn, publisher, {
+            actor: "worker",
+            repositoryId: worker.repositoryId,
+            language
+          }, {
+            mode: this.config.progressUpdates
+          });
+
+          if (hasCodexNetworkAccess(worker)) {
+            await fs.mkdir(worker.codexNetworkAccessWorkspacePath, { recursive: true });
+          }
+
+          let result;
+          try {
+            progress.start();
+            result = await this.runner.runTurn({
+              prompt: this.buildRepositoryTaskPrompt(
+                worker,
+                buildScheduledTaskPlanningPrompt({
+                  repositoryId: worker.repositoryId,
+                  taskId,
+                  taskDir: taskPaths.taskDir,
+                  taskDocumentPath: taskPaths.taskDocumentPath,
+                  statusDocumentPath: taskPaths.statusDocumentPath,
+                  rawRequest: request.rawRequest,
+                  scheduleDescription: request.scheduleDescription
+                })
+              ),
+              repositoryPath: worker.repositoryPath,
+              sandboxMode: worker.sandboxMode,
+              model: worker.model,
+              approvalPolicy: worker.approvalPolicy,
+              searchEnabled: hasCodexNetworkAccess(worker),
+              networkAccessEnabled: hasCodexNetworkAccess(worker),
+              addDirs: listWorkerAddDirs(worker),
+              configOverrides: worker.codexConfigOverrides,
+              onEvent: (event) => {
+                progress.onEvent(event);
+              },
+              signal
+            });
+          } catch (error) {
+            if (error instanceof CodexTurnInterruptedError) {
+              throw new InterruptedConversationTurnError(
+                error.message,
+                touchBinding(binding)
+              );
+            }
+
+            if (error instanceof Error) {
+              throw new Error(
+                buildCodexNetworkAccessFailureMessage(worker, error.message, language)
+              );
+            }
+
+            throw error;
+          } finally {
+            await progress.stop();
+          }
+
+          const completedAt = new Date().toISOString();
+          await updateScheduledTaskControlState(taskPaths.statusDocumentPath, {
+            task_status: "active",
+            scheduler_action: "continue",
+            last_updated: completedAt
+          });
+          await appendScheduledTaskStatusLog(
+            taskPaths.statusDocumentPath,
+            `Planning completed at ${completedAt}`,
+            [
+              `Planner summary: ${this.summarizeScheduledTaskResponse(result.responseText)}`,
+              "Task documents are ready for scheduled execution."
+            ]
+          );
+
+          const taskRecord: ScheduledTaskRecord = {
+            id: taskId,
+            repositoryId: worker.repositoryId,
+            repositoryPath: worker.repositoryPath,
+            sandboxMode: worker.sandboxMode,
+            model: worker.model,
+            approvalPolicy: worker.approvalPolicy,
+            codexConfigOverrides: worker.codexConfigOverrides,
+            allowCodexNetworkAccess: worker.allowCodexNetworkAccess,
+            codexNetworkAccessWorkspacePath: worker.codexNetworkAccessWorkspacePath,
+            taskDir: taskPaths.taskDir,
+            taskDocumentPath: taskPaths.taskDocumentPath,
+            statusDocumentPath: taskPaths.statusDocumentPath,
+            rawRequest: request.rawRequest,
+            taskSummary: request.taskSummary,
+            scheduleDescription: request.scheduleDescription,
+            intervalMs: request.intervalMs,
+            state: "active",
+            createdByUserId: turn.userId,
+            createdAt: createdAt.toISOString(),
+            updatedAt: completedAt,
+            nextRunAt: new Date(createdAt.getTime() + request.intervalMs).toISOString(),
+            runCount: 0
+          };
+
+          await this.scheduledTaskStore.create(taskRecord);
+          taskCreated = true;
+
+          return {
+            binding: touchBinding(binding),
+            finalMessage: clipMessage(
+              this.buildScheduledTaskCreatedMessage(
+                taskRecord,
+                this.summarizeScheduledTaskResponse(result.responseText),
+                language
+              ),
+              this.config.maxResponseChars,
+              undefined,
+              language
+            )
+          };
+        }
+      );
+    } catch (error) {
+      if (!taskCreated) {
+        await fs.rm(taskPaths.taskDir, { recursive: true, force: true });
+      }
+
+      throw error;
+    }
+  }
+
+  private async executeScheduledTask(
+    task: ScheduledTaskRecord,
+    lease: {
+      ownerId: string;
+      executionId: string;
+    }
+  ): Promise<void> {
+    const startedAt = task.lastRunStartedAt ?? new Date().toISOString();
+    const taskStatusPath = task.statusDocumentPath;
+
+    await updateScheduledTaskControlState(taskStatusPath, {
+      task_status: "running",
+      scheduler_action: "continue",
+      last_execution_id: lease.executionId,
+      last_execution_started_at: startedAt,
+      last_updated: startedAt
+    });
+    await appendScheduledTaskStatusLog(
+      taskStatusPath,
+      `Execution ${lease.executionId} started at ${startedAt}`,
+      [
+        "Scheduler claimed the task for execution.",
+        `Repository: ${task.repositoryId}`
+      ]
+    );
+
+    if (task.allowCodexNetworkAccess && task.codexNetworkAccessWorkspacePath) {
+      await fs.mkdir(task.codexNetworkAccessWorkspacePath, { recursive: true });
+    }
+
+    const renewTimer = setInterval(() => {
+      void this.scheduledTaskStore.renewLease({
+        taskId: task.id,
+        ownerId: lease.ownerId,
+        executionId: lease.executionId,
+        now: new Date().toISOString(),
+        leaseMs: SCHEDULED_TASK_EXECUTION_LEASE_MS
+      });
+    }, SCHEDULED_TASK_LEASE_RENEW_MS);
+    renewTimer.unref?.();
+
+    try {
+      const result = await this.runner.runTurn({
+        prompt: this.buildRepositoryTaskPrompt(
+          task,
+          buildScheduledTaskExecutionPrompt({
+            repositoryId: task.repositoryId,
+            taskId: task.id,
+            taskDocumentPath: task.taskDocumentPath,
+            statusDocumentPath: task.statusDocumentPath,
+            executionId: lease.executionId
+          })
+        ),
+        repositoryPath: task.repositoryPath,
+        sandboxMode: task.sandboxMode,
+        model: task.model,
+        approvalPolicy: task.approvalPolicy,
+        searchEnabled: Boolean(task.allowCodexNetworkAccess),
+        networkAccessEnabled: Boolean(task.allowCodexNetworkAccess),
+        addDirs:
+          task.allowCodexNetworkAccess && task.codexNetworkAccessWorkspacePath
+            ? [task.codexNetworkAccessWorkspacePath]
+            : undefined,
+        configOverrides: task.codexConfigOverrides
+      });
+
+      const finishedAt = new Date().toISOString();
+      const controlState = await this.readScheduledTaskControlStateSafe(taskStatusPath);
+      const stop = scheduledTaskShouldStop(controlState);
+      const nextTaskStatus =
+        stop
+          ? "completed"
+          : controlState.taskStatus === "running"
+            ? "active"
+            : controlState.taskStatus;
+
+      await updateScheduledTaskControlState(taskStatusPath, {
+        task_status: nextTaskStatus,
+        scheduler_action: stop ? "stop" : "continue",
+        last_execution_id: lease.executionId,
+        last_execution_finished_at: finishedAt,
+        last_updated: finishedAt
+      });
+      await appendScheduledTaskStatusLog(
+        taskStatusPath,
+        `Execution ${lease.executionId} completed at ${finishedAt}`,
+        [
+          `Scheduler summary: ${this.summarizeScheduledTaskResponse(result.responseText)}`,
+          `Next action: ${stop ? "stop" : "continue"}`
+        ]
+      );
+      await this.scheduledTaskStore.completeExecution({
+        taskId: task.id,
+        ownerId: lease.ownerId,
+        executionId: lease.executionId,
+        finishedAt,
+        stop
+      });
+    } catch (error) {
+      const finishedAt = new Date().toISOString();
+      const errorMessage =
+        error instanceof Error
+          ? buildCodexNetworkAccessFailureMessage(task, error.message)
+          : `Unknown scheduled task failure for "${task.id}".`;
+
+      await updateScheduledTaskControlState(taskStatusPath, {
+        task_status: "active",
+        scheduler_action: "continue",
+        last_execution_id: lease.executionId,
+        last_execution_finished_at: finishedAt,
+        last_updated: finishedAt
+      });
+      await appendScheduledTaskStatusLog(
+        taskStatusPath,
+        `Execution ${lease.executionId} failed at ${finishedAt}`,
+        [sanitizeUserFacingText(errorMessage)]
+      );
+      await this.scheduledTaskStore.failExecution({
+        taskId: task.id,
+        ownerId: lease.ownerId,
+        executionId: lease.executionId,
+        finishedAt,
+        errorMessage
+      });
+      throw error;
+    } finally {
+      clearInterval(renewTimer);
+    }
+  }
+
   private async runWorkerTurn(
     turn: InboundTurn,
     binding: ConversationBinding,
@@ -612,6 +1047,93 @@ export class CodexBridgeService {
       output: result.responseText,
       returnedFiles: diffTrackedDocumentFiles(documentFilesBefore, documentFilesAfter)
     };
+  }
+
+  private buildRepositoryTaskPrompt(
+    worker: Pick<
+      RepositoryBinding,
+      | "repositoryId"
+      | "repositoryPath"
+      | "sandboxMode"
+      | "allowCodexNetworkAccess"
+      | "codexNetworkAccessWorkspacePath"
+    >,
+    taskPrompt: string
+  ): string {
+    const lines: string[] = [];
+
+    if (hasCodexNetworkAccess(worker)) {
+      lines.push(
+        "Worker execution context:",
+        `- Primary repository path: ${worker.repositoryPath}`,
+        "- nuntius requested web access for this worker session by launching Codex with `--search`.",
+        worker.sandboxMode === "workspace-write"
+          ? "- nuntius also enabled outbound shell network access for the workspace-write sandbox via `-c sandbox_workspace_write.network_access=true`."
+          : "",
+        `- Use this workspace for cloned or downloaded artifacts that do not belong in the primary repository: ${worker.codexNetworkAccessWorkspacePath}`,
+        "- Network-dependent commands may still fail if the host Codex runtime or OS policy blocks outbound access.",
+        "- If outbound access is unavailable, stop and report the failure clearly instead of claiming you fetched remote data.",
+        ""
+      );
+    }
+
+    lines.push(taskPrompt);
+    return lines.filter(Boolean).join("\n");
+  }
+
+  private buildScheduledTaskCreatedMessage(
+    task: ScheduledTaskRecord,
+    plannerSummary: string,
+    language: ConversationLanguage
+  ): string {
+    const relativeTaskDir = path.relative(task.repositoryPath, task.taskDir) || ".";
+    return [
+      localize(language, {
+        en: `Created scheduled task "${task.id}" for repository "${task.repositoryId}".`,
+        zh: `已为仓库 "${task.repositoryId}" 创建定时任务 "${task.id}"。`
+      }),
+      localize(language, {
+        en: `Schedule: ${task.scheduleDescription}. Next run: ${task.nextRunAt ?? "not scheduled"}.`,
+        zh: `执行频率：${task.scheduleDescription}。下次运行：${task.nextRunAt ?? "未安排"}。`
+      }),
+      localize(language, {
+        en: `Task folder: ${relativeTaskDir}`,
+        zh: `任务目录：${relativeTaskDir}`
+      }),
+      localize(language, {
+        en: `Planner summary: ${plannerSummary}`,
+        zh: `规划摘要：${plannerSummary}`
+      })
+    ].join("\n");
+  }
+
+  private summarizeScheduledTaskResponse(responseText: string): string {
+    const sanitized = sanitizeUserFacingText(responseText).replace(/\s+/g, " ").trim();
+    if (!sanitized) {
+      return "No summary returned.";
+    }
+
+    return sanitized.length <= 280 ? sanitized : `${sanitized.slice(0, 277)}...`;
+  }
+
+  private async readScheduledTaskControlStateSafe(
+    filePath: string
+  ): Promise<Awaited<ReturnType<typeof readScheduledTaskControlState>> | {
+    frontMatter: Record<string, string>;
+    body: string;
+    taskStatus: string;
+    schedulerAction: "continue";
+  }> {
+    try {
+      return await readScheduledTaskControlState(filePath);
+    } catch {
+      return {
+        frontMatter: {},
+        body: "",
+        taskStatus: "active",
+        schedulerAction: "continue"
+      };
+    }
   }
 
   private resolveRepository(turn: InboundTurn, repositoryId: string): RepositoryTarget {

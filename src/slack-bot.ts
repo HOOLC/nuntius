@@ -118,6 +118,7 @@ export class SlackBot {
   async start(): Promise<void> {
     const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
     logSessionReconciliation("Slack bot startup", sessionRefresh);
+    this.bridgeRuntime.startBackgroundServices();
     await this.refreshSlackClient();
     this.installSignalHandlers();
 
@@ -138,6 +139,8 @@ export class SlackBot {
   }
 
   async stop(): Promise<void> {
+    this.bridgeRuntime.stopBackgroundServices();
+
     if (!this.server) {
       return;
     }

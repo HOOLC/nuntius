@@ -1,6 +1,7 @@
 import { CodexRunner } from "./codex-runner.js";
 import { loadConfig, type BridgeConfig } from "./config.js";
 import { InteractionRouter } from "./interaction-router.js";
+import { ScheduledTaskScheduler } from "./scheduled-task-scheduler.js";
 import { SerialTurnQueue } from "./serial-turn-queue.js";
 import { CodexBridgeService, type SessionReconciliationResult } from "./service.js";
 import { FileSessionStore } from "./session-store.js";
@@ -22,6 +23,8 @@ export interface BridgeRuntime {
   getRepositoryRegistrySnapshot(): RepositoryRegistrySnapshot;
   reloadRepositoryRegistry(): RepositoryRegistrySnapshot;
   reconcileSessionBindings(): Promise<SessionReconciliationResult>;
+  startBackgroundServices(): void;
+  stopBackgroundServices(): void;
 }
 
 type ReloadableBridgeConfig = Omit<BridgeConfig, "codexBinary" | "sessionStorePath">;
@@ -32,6 +35,7 @@ export function createBridgeRuntime(config: BridgeConfig = loadConfig()): Bridge
   const runner = new CodexRunner(config.codexBinary);
   const bridge = new CodexBridgeService(config, sessionStore, queue, runner);
   const router = new InteractionRouter(bridge);
+  const scheduledTaskScheduler = new ScheduledTaskScheduler(bridge);
 
   return {
     config,
@@ -46,7 +50,13 @@ export function createBridgeRuntime(config: BridgeConfig = loadConfig()): Bridge
       Object.assign(config, getReloadableBridgeConfig(refreshed));
       return buildRepositoryRegistrySnapshot(config);
     },
-    reconcileSessionBindings: () => bridge.reconcileSessionBindings()
+    reconcileSessionBindings: () => bridge.reconcileSessionBindings(),
+    startBackgroundServices: () => {
+      scheduledTaskScheduler.start();
+    },
+    stopBackgroundServices: () => {
+      scheduledTaskScheduler.stop();
+    }
   };
 }
 

@@ -77,6 +77,7 @@ class DiscordBotWorker {
   async start(): Promise<void> {
     const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
     logSessionReconciliation("Discord worker startup", sessionRefresh);
+    this.bridgeRuntime.startBackgroundServices();
 
     this.client.once(Events.ClientReady, (client) => {
       console.log(`Discord bot connected as ${client.user.tag}.`);
@@ -122,6 +123,7 @@ class DiscordBotWorker {
     }
 
     this.stopped = true;
+    this.bridgeRuntime.stopBackgroundServices();
     this.client.removeAllListeners();
     this.client.destroy();
   }
@@ -144,6 +146,9 @@ class DiscordBotWorker {
           return;
         case "repos":
           await this.handleDirectInteractionCommand(interaction, "/codex repos");
+          return;
+        case "tasks":
+          await this.handleDirectInteractionCommand(interaction, "/codex tasks");
           return;
         case "reset": {
           const scope = interaction.options.getString("scope") ?? "all";

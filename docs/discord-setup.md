@@ -123,6 +123,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - `/codex bind repo:<repo-id>`
 - `/codex status`
 - `/codex repos`
+- `/codex tasks`
 - `/codex reset [scope]`
 - `/codex interrupt`
 - `/codex help`
@@ -150,6 +151,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - Slash `bind` in a guild text channel or announcement channel also creates a thread automatically.
 - Normal guild-channel messages are ignored unless they mention the bot.
 - Once a thread or DM is bound to a repo, later replies go straight to that worker session; use `/codex bind` or `/codex reset` to change the routing explicitly.
+- In an unbound top-level conversation, plain text like `create a task running per hour in arbitero` lets the handler create a scheduled background task under `.nuntius/scheduled-tasks/<task-id>/` for that repository without binding the thread.
 - nuntius adds status reactions to inbound Discord chat messages; slash-command interactions keep using deferred ephemeral acknowledgements.
 - `/codexadmin` is restricted to Discord user IDs listed in `NUNTIUS_DISCORD_ADMIN_USER_IDS`.
 - `/codexadmin reloadconfig` reloads the TOML config and repo registry in-process.

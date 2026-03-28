@@ -23,7 +23,9 @@ interface LocalChatState {
 }
 
 async function main(): Promise<void> {
-  const { bridge, router } = createBridgeRuntime();
+  const runtime = createBridgeRuntime();
+  runtime.startBackgroundServices();
+  const { bridge, router } = runtime;
 
   const state = parseArgs(process.argv.slice(2));
   const rl = readline.createInterface({
