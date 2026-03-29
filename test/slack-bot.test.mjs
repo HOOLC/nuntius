@@ -92,7 +92,7 @@ test("thread replies after bind go straight to the worker session and reuse it",
     ["chat.postMessage", "chat.postMessage"]
   );
   assert.equal(harness.records[0].body.thread_ts, "1000");
-  assert.equal(harness.records[0].body.text, "1 file change.");
+  assert.equal(harness.records[0].body.text, "✏️ 1 edit");
   assert.equal(harness.records[1].body.thread_ts, "1000");
   assert.equal(harness.records[1].body.text, "Worker summary output.");
   assert.deepEqual(
@@ -135,7 +135,7 @@ test("thread replies after bind go straight to the worker session and reuse it",
     ["chat.postMessage", "chat.postMessage"]
   );
   assert.equal(harness.records[0].body.thread_ts, "1000");
-  assert.equal(harness.records[0].body.text, "1 file change.");
+  assert.equal(harness.records[0].body.text, "✏️ 1 edit");
   assert.equal(harness.records[1].body.thread_ts, "1000");
   assert.equal(harness.records[1].body.text, "Worker follow-up output.");
   assert.deepEqual(

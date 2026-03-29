@@ -1184,7 +1184,7 @@ test("heartbeat updates refresh the working indicator when the publisher support
     publisher.progress.some((message) => message.includes("still working")),
     false
   );
-  assert.deepEqual(publisher.progress, ["1 file change."]);
+  assert.deepEqual(publisher.progress, ["✏️ 1 edit"]);
 });
 
 test("non-zero command exits do not emit progress noise", async (t) => {
@@ -1251,8 +1251,8 @@ test("non-zero command exits do not emit progress noise", async (t) => {
     false
   );
   assert.deepEqual(publisher.progress, [
-    "1 command ran.",
-    "1 command ran, 1 file change."
+    "⚙️ 1 cmd",
+    "⚙️ 1 cmd · ✏️ 1 edit"
   ]);
 });
 
@@ -1327,9 +1327,104 @@ test("tool activity updates the progress summary as commands and file changes co
   await service.handleTurn(turn, publisher);
 
   assert.deepEqual(publisher.progress, [
-    "1 command ran.",
-    "1 command ran, 2 file changes.",
-    "2 commands ran, 2 file changes."
+    "⚙️ 1 cmd",
+    "⚙️ 1 cmd · ✏️ 2 edits",
+    "⚙️ 2 cmds · ✏️ 2 edits"
+  ]);
+});
+
+test("tool activity summaries include agents, searches, globs, file reads, commands, and edits", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-tool-progress-immersive-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "spawn_agent",
+            agents: ["agent-1", "agent-2"]
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "search_query",
+            queries: ["a", "b", "c", "d"]
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "glob",
+            patterns: ["src/**/*.ts", "test/**/*.mjs"]
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "file_read",
+            paths: Array.from({ length: 15 }, (_, index) => `file-${index}.ts`)
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            exit_code: 0
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "file_change",
+            changes: Array.from({ length: 4 }, (_, index) => ({
+              path: path.join(repoDir, `file-${index}.ts`),
+              kind: "update"
+            }))
+          }
+        });
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: "Done.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("inspect the repo");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(publisher.progress, [
+    "🤖 2 agents",
+    "🤖 2 agents · 🔍 4 searches",
+    "🤖 2 agents · 🔍 4 searches · 🔍 2 globs",
+    "🤖 2 agents · 🔍 4 searches · 🔍 2 globs · 📖 15 files",
+    "🤖 2 agents · 🔍 4 searches · 🔍 2 globs · 📖 15 files · ⚙️ 1 cmd",
+    "🤖 2 agents · 🔍 4 searches · 🔍 2 globs · 📖 15 files · ⚙️ 1 cmd · ✏️ 4 edits"
   ]);
 });
 

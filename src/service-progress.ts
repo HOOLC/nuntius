@@ -42,6 +42,10 @@ export class CodexRunProgressReporter {
   private sawTurnCompleted = false;
   private lastActivityAt = Date.now();
   private workingIndicatorVisible = false;
+  private completedAgentCount = 0;
+  private completedSearchCount = 0;
+  private completedGlobCount = 0;
+  private completedFileReadCount = 0;
   private completedCommandCount = 0;
   private completedFileEditCount = 0;
 
@@ -125,36 +129,29 @@ export class CodexRunProgressReporter {
   private buildToolSummaryMessage(
     item: Record<string, unknown>
   ): ProgressMessage | undefined {
-    if (item.type === "command_execution") {
-      this.completedCommandCount += 1;
-      return toProgressMessage(
-        formatToolUsageSummary(
-          this.context.language,
-          this.completedCommandCount,
-          this.completedFileEditCount
-        ),
-        "status"
-      );
+    const usage = summarizeToolUsage(item);
+    if (!usage) {
+      return undefined;
     }
 
-    if (item.type === "file_change") {
-      const fileEditCount = countFileEdits(item.changes);
-      if (fileEditCount < 1) {
-        return undefined;
-      }
+    this.completedAgentCount += usage.agentCount;
+    this.completedSearchCount += usage.searchCount;
+    this.completedGlobCount += usage.globCount;
+    this.completedFileReadCount += usage.fileReadCount;
+    this.completedCommandCount += usage.commandCount;
+    this.completedFileEditCount += usage.fileEditCount;
 
-      this.completedFileEditCount += fileEditCount;
-      return toProgressMessage(
-        formatToolUsageSummary(
-          this.context.language,
-          this.completedCommandCount,
-          this.completedFileEditCount
-        ),
-        "status"
-      );
-    }
-
-    return undefined;
+    return toProgressMessage(
+      formatToolUsageSummary(this.context.language, {
+        agentCount: this.completedAgentCount,
+        searchCount: this.completedSearchCount,
+        globCount: this.completedGlobCount,
+        fileReadCount: this.completedFileReadCount,
+        commandCount: this.completedCommandCount,
+        fileEditCount: this.completedFileEditCount
+      }),
+      "status"
+    );
   }
 
   async stop(): Promise<void> {
@@ -308,25 +305,67 @@ function normalizeProgressText(text: string): string | undefined {
 
 function formatToolUsageSummary(
   language: ConversationLanguage,
-  commandCount: number,
-  fileEditCount: number
+  counts: {
+    agentCount: number;
+    searchCount: number;
+    globCount: number;
+    fileReadCount: number;
+    commandCount: number;
+    fileEditCount: number;
+  }
 ): string | undefined {
   const parts: string[] = [];
 
-  if (commandCount > 0) {
+  if (counts.agentCount > 0) {
     parts.push(
       localize(language, {
-        en: `${commandCount} ${commandCount === 1 ? "command ran" : "commands ran"}`,
-        zh: `已运行 ${commandCount} 个命令`
+        en: `🤖 ${counts.agentCount} ${counts.agentCount === 1 ? "agent" : "agents"}`,
+        zh: `🤖 ${counts.agentCount} 个 agent`
       })
     );
   }
 
-  if (fileEditCount > 0) {
+  if (counts.searchCount > 0) {
     parts.push(
       localize(language, {
-        en: `${fileEditCount} ${fileEditCount === 1 ? "file change" : "file changes"}`,
-        zh: `已完成 ${fileEditCount} 次文件修改`
+        en: `🔍 ${counts.searchCount} ${counts.searchCount === 1 ? "search" : "searches"}`,
+        zh: `🔍 ${counts.searchCount} 次搜索`
+      })
+    );
+  }
+
+  if (counts.globCount > 0) {
+    parts.push(
+      localize(language, {
+        en: `🔍 ${counts.globCount} ${counts.globCount === 1 ? "glob" : "globs"}`,
+        zh: `🔍 ${counts.globCount} 次 glob`
+      })
+    );
+  }
+
+  if (counts.fileReadCount > 0) {
+    parts.push(
+      localize(language, {
+        en: `📖 ${counts.fileReadCount} ${counts.fileReadCount === 1 ? "file" : "files"}`,
+        zh: `📖 ${counts.fileReadCount} 个文件`
+      })
+    );
+  }
+
+  if (counts.commandCount > 0) {
+    parts.push(
+      localize(language, {
+        en: `⚙️ ${counts.commandCount} ${counts.commandCount === 1 ? "cmd" : "cmds"}`,
+        zh: `⚙️ ${counts.commandCount} 条命令`
+      })
+    );
+  }
+
+  if (counts.fileEditCount > 0) {
+    parts.push(
+      localize(language, {
+        en: `✏️ ${counts.fileEditCount} ${counts.fileEditCount === 1 ? "edit" : "edits"}`,
+        zh: `✏️ ${counts.fileEditCount} 处修改`
       })
     );
   }
@@ -335,7 +374,7 @@ function formatToolUsageSummary(
     return undefined;
   }
 
-  return `${parts.join(", ")}.`;
+  return parts.join(" · ");
 }
 
 function countFileEdits(changes: unknown): number {
@@ -344,6 +383,152 @@ function countFileEdits(changes: unknown): number {
   }
 
   return changes.filter((change) => isRecord(change)).length;
+}
+
+function summarizeToolUsage(item: Record<string, unknown>): {
+  agentCount: number;
+  searchCount: number;
+  globCount: number;
+  fileReadCount: number;
+  commandCount: number;
+  fileEditCount: number;
+} | undefined {
+  const toolId = readToolIdentifier(item);
+
+  if (item.type === "command_execution" || toolId === "exec_command") {
+    return {
+      agentCount: 0,
+      searchCount: 0,
+      globCount: 0,
+      fileReadCount: 0,
+      commandCount: 1,
+      fileEditCount: 0
+    };
+  }
+
+  if (item.type === "file_change" || toolId === "apply_patch") {
+    const fileEditCount = countFileEdits(item.changes);
+    if (fileEditCount < 1) {
+      return undefined;
+    }
+
+    return {
+      agentCount: 0,
+      searchCount: 0,
+      globCount: 0,
+      fileReadCount: 0,
+      commandCount: 0,
+      fileEditCount
+    };
+  }
+
+  if (toolId === "spawn_agent" || item.type === "spawn_agent" || item.type === "agent_spawn") {
+    return withSingleCategory("agentCount", readUsageCount(item, {
+      numericKeys: ["count", "agentCount", "agent_count"],
+      arrayKeys: ["agents", "agentIds", "agent_ids", "targets"]
+    }));
+  }
+
+  if (
+    toolId === "search_query" ||
+    toolId === "image_query" ||
+    item.type === "search_query" ||
+    item.type === "web_search" ||
+    item.type === "search"
+  ) {
+    return withSingleCategory("searchCount", readUsageCount(item, {
+      numericKeys: ["count", "queryCount", "query_count", "searchCount", "search_count"],
+      arrayKeys: ["queries", "searches", "search_query", "image_query"]
+    }));
+  }
+
+  if (toolId === "glob" || item.type === "glob" || item.type === "file_glob") {
+    return withSingleCategory("globCount", readUsageCount(item, {
+      numericKeys: ["count", "globCount", "glob_count"],
+      arrayKeys: ["globs", "patterns", "paths"]
+    }));
+  }
+
+  if (
+    toolId === "read_file" ||
+    toolId === "open_file" ||
+    item.type === "file_read" ||
+    item.type === "read_file" ||
+    item.type === "open_file"
+  ) {
+    return withSingleCategory("fileReadCount", readUsageCount(item, {
+      numericKeys: ["count", "fileCount", "file_count"],
+      arrayKeys: ["files", "paths"]
+    }));
+  }
+
+  return undefined;
+}
+
+function withSingleCategory(
+  key: "agentCount" | "searchCount" | "globCount" | "fileReadCount",
+  value: number
+): {
+  agentCount: number;
+  searchCount: number;
+  globCount: number;
+  fileReadCount: number;
+  commandCount: number;
+  fileEditCount: number;
+} | undefined {
+  if (value < 1) {
+    return undefined;
+  }
+
+  return {
+    agentCount: key === "agentCount" ? value : 0,
+    searchCount: key === "searchCount" ? value : 0,
+    globCount: key === "globCount" ? value : 0,
+    fileReadCount: key === "fileReadCount" ? value : 0,
+    commandCount: 0,
+    fileEditCount: 0
+  };
+}
+
+function readUsageCount(
+  item: Record<string, unknown>,
+  input: {
+    numericKeys: string[];
+    arrayKeys: string[];
+  }
+): number {
+  for (const key of input.numericKeys) {
+    const value = item[key];
+    if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+      return value;
+    }
+  }
+
+  for (const key of input.arrayKeys) {
+    const value = item[key];
+    if (Array.isArray(value) && value.length > 0) {
+      return value.length;
+    }
+  }
+
+  return 1;
+}
+
+function readToolIdentifier(item: Record<string, unknown>): string | undefined {
+  const candidates = [
+    item.name,
+    item.tool_name,
+    item.toolName,
+    item.type
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim().replace(/[A-Z]/g, (character) => `_${character.toLowerCase()}`);
+    }
+  }
+
+  return undefined;
 }
 
 function toProgressMessage(

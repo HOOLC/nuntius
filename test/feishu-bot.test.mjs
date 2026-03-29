@@ -221,7 +221,7 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
   assert.equal(harness.records[0].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[0].body.msg_type, "text");
   assert.equal(harness.records[0].body.reply_in_thread, true);
-  assert.equal(readTextContent(harness.records[0]), "1 file change.");
+  assert.equal(readTextContent(harness.records[0]), "✏️ 1 edit");
   assert.equal(harness.records[1].path, "/im/v1/messages/om-message-1");
   assert.equal(harness.records[1].body.msg_type, "text");
   assert.equal(readTextContent(harness.records[1]), "Worker summary output.");
@@ -262,7 +262,7 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     ["message.reply", "message.update"]
   );
   assert.equal(harness.records[0].body.msg_type, "text");
-  assert.equal(readTextContent(harness.records[0]), "1 file change.");
+  assert.equal(readTextContent(harness.records[0]), "✏️ 1 edit");
   assert.equal(harness.records[1].path, "/im/v1/messages/om-message-1");
   assert.equal(harness.records[1].body.msg_type, "text");
   assert.equal(readTextContent(harness.records[1]), "Worker follow-up output.");
