@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { FeishuAdapter } from "../dist/adapters/feishu.js";
 
-test("Feishu reuses one progress message for heartbeats, progress updates, and the final reply", async () => {
+test("Feishu reuses one progress message for heartbeats and progress updates, then posts the final reply separately", async () => {
   const postedMessages = [];
   const updatedMessages = [];
   let acknowledged = 0;
@@ -56,8 +56,9 @@ test("Feishu reuses one progress message for heartbeats, progress updates, and t
     JSON.parse(postedMessages[0].content).text,
     /\[Working\]\nStill working\. Last update: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/
   );
-  assert.deepEqual(postedMessages.slice(1), []);
-  assert.equal(updatedMessages.length, 4);
+  assert.equal(postedMessages.length, 2);
+  assert.equal(JSON.parse(postedMessages[1].content).text, "Finished.");
+  assert.equal(updatedMessages.length, 3);
   assert.equal(updatedMessages[0].messageId, "om-working-1");
   assert.match(
     JSON.parse(updatedMessages[0].message.content).text,
@@ -72,10 +73,5 @@ test("Feishu reuses one progress message for heartbeats, progress updates, and t
   assert.equal(
     JSON.parse(updatedMessages[2].message.content).text,
     "1 command ran, 2 file changes."
-  );
-  assert.equal(updatedMessages[3].messageId, "om-working-1");
-  assert.equal(
-    JSON.parse(updatedMessages[3].message.content).text,
-    "Finished."
   );
 });

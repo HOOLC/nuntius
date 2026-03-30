@@ -102,9 +102,7 @@ class FeishuPublisher implements TurnPublisher {
   ): Promise<void> {
     await this.syncProcessingStatus("finished");
     const replyMessage = renderFeishuReply(message.text, message.truncated, language);
-    if (!(await this.replaceProgressMessage(replyMessage))) {
-      await this.envelope.postMessage(replyMessage);
-    }
+    await this.envelope.postMessage(replyMessage);
 
     if (!this.envelope.uploadFile) {
       return;
@@ -141,18 +139,6 @@ class FeishuPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("interrupted");
-    if (await this.replaceProgressMessage(
-      renderFeishuStatus(
-        localize(language, {
-          en: "Interrupted",
-          zh: "已中断"
-        }),
-        message
-      )
-    )) {
-      return;
-    }
-
     await this.envelope.postMessage(
       renderFeishuStatus(
         localize(language, {
@@ -170,10 +156,6 @@ class FeishuPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("failed");
-    if (await this.replaceProgressMessage(renderFeishuError(errorMessage, language))) {
-      return;
-    }
-
     await this.envelope.postMessage(renderFeishuError(errorMessage, language));
   }
 
@@ -213,16 +195,6 @@ class FeishuPublisher implements TurnPublisher {
     if (result.messageId && this.envelope.updateMessage) {
       this.progressMessageId = result.messageId;
     }
-  }
-
-  private async replaceProgressMessage(message: FeishuChatMessage): Promise<boolean> {
-    if (!this.progressMessageId || !this.envelope.updateMessage) {
-      return false;
-    }
-
-    await this.envelope.updateMessage(this.progressMessageId, message);
-    this.progressMessageId = undefined;
-    return true;
   }
 }
 

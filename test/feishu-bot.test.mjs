@@ -111,6 +111,36 @@ test("duplicate long connection events are ignored", async (t) => {
   assert.deepEqual(harness.reactionRecords, []);
 });
 
+test("duplicate long connection events stay deduped after a bot restart", async (t) => {
+  const harness = createHarness();
+  t.after(() => harness.cleanup());
+
+  const event = buildMessageEvent({
+    eventId: "evt-dm-restart-1",
+    messageId: "om-dm-restart-1",
+    chatId: "oc-chat-dm-1",
+    chatType: "p2p",
+    text: "/codex help"
+  });
+
+  const firstBot = new FeishuBot();
+  await firstBot.refreshFeishuClient();
+  harness.resetRecords();
+
+  firstBot.handleIncomingLongConnectionEvent(event);
+  await waitFor(() => harness.records.length === 1);
+
+  const secondBot = new FeishuBot();
+  await secondBot.refreshFeishuClient();
+  harness.resetRecords();
+
+  secondBot.handleIncomingLongConnectionEvent(event);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.deepEqual(harness.records, []);
+  assert.deepEqual(harness.reactionRecords, []);
+});
+
 test("admin hotreload rebuilds and requests a supervisor reload", async (t) => {
   const harness = createHarness();
   t.after(() => harness.cleanup());
@@ -213,16 +243,18 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.some((record) => record.kind === "message.update"));
+  await waitFor(() =>
+    harness.records.filter((record) => record.kind === "message.reply").length === 2
+  );
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.update"]
+    ["message.reply", "message.reply"]
   );
   assert.equal(harness.records[0].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[0].body.msg_type, "text");
   assert.equal(harness.records[0].body.reply_in_thread, true);
   assert.equal(readTextContent(harness.records[0]), "✏️ 1 edit");
-  assert.equal(harness.records[1].path, "/im/v1/messages/om-message-1");
+  assert.equal(harness.records[1].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[1].body.msg_type, "text");
   assert.equal(readTextContent(harness.records[1]), "Worker summary output.");
   assert.deepEqual(
@@ -256,14 +288,16 @@ test("group bind bootstraps a Feishu thread and thread replies reuse the worker 
     })
   );
 
-  await waitFor(() => harness.records.some((record) => record.kind === "message.update"));
+  await waitFor(() =>
+    harness.records.filter((record) => record.kind === "message.reply").length === 2
+  );
   assert.deepEqual(
     harness.records.map((record) => record.kind),
-    ["message.reply", "message.update"]
+    ["message.reply", "message.reply"]
   );
   assert.equal(harness.records[0].body.msg_type, "text");
   assert.equal(readTextContent(harness.records[0]), "✏️ 1 edit");
-  assert.equal(harness.records[1].path, "/im/v1/messages/om-message-1");
+  assert.equal(harness.records[1].path, "/im/v1/messages/om-root-1/reply");
   assert.equal(harness.records[1].body.msg_type, "text");
   assert.equal(readTextContent(harness.records[1]), "Worker follow-up output.");
   assert.deepEqual(
@@ -358,7 +392,7 @@ test("thread file attachments are downloaded, exposed to Codex, and returned as 
 
   const summaryReply = harness.records.find(
     (record) =>
-      record.kind === "message.update" &&
+      record.kind === "message.reply" &&
       record.body.msg_type === "text" &&
       readTextContent(record) === "Worker summary output."
   );

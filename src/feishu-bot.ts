@@ -13,6 +13,7 @@ import {
   type FeishuChatMessage,
   type FeishuEnvelope
 } from "./adapters/feishu.js";
+import { ActiveTaskTracker } from "./active-task-tracker.js";
 import {
   formatBridgeFailure,
   formatSessionReconciliationLines,
@@ -35,6 +36,10 @@ import {
   runModuleWithRestartGuard
 } from "./process-guard.js";
 import { maybeRelaunchCurrentProcessPersistently } from "./persistent-launch.js";
+import {
+  deriveRecentIdStorePath,
+  FileRecentIdStore
+} from "./recent-id-store.js";
 import { trimCodeFencePayload } from "./text-formatting.js";
 import {
   isSupervisorToWorkerMessage,
@@ -169,9 +174,14 @@ export class FeishuBot {
   private feishuConfig = loadFeishuBotConfig();
   private feishuApi = new FeishuApiClient(this.feishuConfig);
   private readonly adapter = new FeishuAdapter(this.bridgeRuntime.router);
-  private readonly recentMessageIds = new Map<string, number>();
+  private readonly recentMessageIds = new FileRecentIdStore(
+    deriveRecentIdStorePath(this.bridgeRuntime.config.sessionStorePath, "feishu-messages"),
+    EVENT_DEDUP_TTL_MS
+  );
+  private readonly activeTasks = new ActiveTaskTracker();
   private longConnection?: Lark.WSClient;
   private botOpenId?: string;
+  private stopping = false;
 
   constructor(private readonly runtime: FeishuBotRuntime = {}) {}
 
@@ -186,15 +196,19 @@ export class FeishuBot {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     this.bridgeRuntime.stopBackgroundServices();
 
-    if (!this.longConnection) {
-      return;
+    if (this.longConnection) {
+      const activeConnection = this.longConnection;
+      this.longConnection = undefined;
+      activeConnection.close();
     }
 
-    const activeConnection = this.longConnection;
-    this.longConnection = undefined;
-    activeConnection.close();
+    const drainResult = await this.activeTasks.drain();
+    if (drainResult === "timed_out") {
+      console.warn("Feishu bot shutdown timed out while waiting for active turns to finish.");
+    }
   }
 
   async refreshFeishuClient(): Promise<void> {
@@ -239,19 +253,21 @@ export class FeishuBot {
         loggerLevel: Lark.LoggerLevel.warn
       }).register({
         "im.message.receive_v1": (payload: FeishuMessageReceiveEvent) => {
-          this.handleIncomingLongConnectionEvent(payload);
+          void this.activeTasks.track(this.handleIncomingLongConnectionEvent(payload));
         }
       })
     });
   }
 
-  private handleIncomingLongConnectionEvent(payload: FeishuMessageReceiveEvent): void {
+  private async handleIncomingLongConnectionEvent(
+    payload: FeishuMessageReceiveEvent
+  ): Promise<void> {
     const messageId = payload.message?.message_id;
-    if (!messageId || this.isDuplicateMessage(messageId)) {
+    if (!messageId || (await this.isDuplicateMessage(messageId))) {
       return;
     }
 
-    void this.handleMessageEvent(payload).catch((error) => {
+    await this.handleMessageEvent(payload).catch((error) => {
       console.error(formatBridgeFailure("Feishu", error));
     });
   }
@@ -831,21 +847,12 @@ export class FeishuBot {
     return this.feishuConfig.adminOpenIds.includes(userId);
   }
 
-  private isDuplicateMessage(messageId: string): boolean {
-    const now = Date.now();
-
-    for (const [existingMessageId, seenAt] of this.recentMessageIds.entries()) {
-      if (now - seenAt > EVENT_DEDUP_TTL_MS) {
-        this.recentMessageIds.delete(existingMessageId);
-      }
-    }
-
-    if (this.recentMessageIds.has(messageId)) {
+  private async isDuplicateMessage(messageId: string): Promise<boolean> {
+    if (this.stopping) {
       return true;
     }
 
-    this.recentMessageIds.set(messageId, now);
-    return false;
+    return this.recentMessageIds.rememberIfNew(messageId);
   }
 }
 

@@ -8,6 +8,7 @@ import {
   GatewayIntentBits,
   Message,
   type MessageReaction,
+  type Interaction,
   Partials,
   type ChatInputCommandInteraction,
   type NewsChannel,
@@ -17,6 +18,7 @@ import {
 } from "discord.js";
 
 import { DiscordAdapter } from "./adapters/discord.js";
+import { ActiveTaskTracker } from "./active-task-tracker.js";
 import {
   formatBridgeFailure,
   formatSessionReconciliationLines,
@@ -72,6 +74,7 @@ class DiscordBotWorker {
     partials: [Partials.Channel]
   });
   private readonly adapter = new DiscordAdapter(this.bridgeRuntime.router);
+  private readonly activeTasks = new ActiveTaskTracker();
   private stopped = false;
 
   async start(): Promise<void> {
@@ -88,6 +91,34 @@ class DiscordBotWorker {
     });
 
     this.client.on(Events.InteractionCreate, async (interaction) => {
+      void this.activeTasks.track(this.handleInteractionEvent(interaction));
+    });
+
+    this.client.on(Events.MessageCreate, async (message) => {
+      void this.activeTasks.track(this.handleMessageEvent(message));
+    });
+
+    await this.client.login(this.discordConfig.token);
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+
+    this.stopped = true;
+    this.bridgeRuntime.stopBackgroundServices();
+    this.client.removeAllListeners();
+    this.client.destroy();
+
+    const drainResult = await this.activeTasks.drain();
+    if (drainResult === "timed_out") {
+      console.warn("Discord bot shutdown timed out while waiting for active turns to finish.");
+    }
+  }
+
+  private async handleInteractionEvent(interaction: Interaction): Promise<void> {
+    try {
       if (!interaction.isChatInputCommand()) {
         return;
       }
@@ -108,24 +139,17 @@ class DiscordBotWorker {
       if (interaction.commandName === "codexadmin") {
         await this.handleAdminCommandInteraction(interaction);
       }
-    });
-
-    this.client.on(Events.MessageCreate, async (message) => {
-      await this.handleMessage(message);
-    });
-
-    await this.client.login(this.discordConfig.token);
+    } catch (error) {
+      console.error(formatBridgeFailure("Discord", error));
+    }
   }
 
-  async stop(): Promise<void> {
-    if (this.stopped) {
-      return;
+  private async handleMessageEvent(message: Message): Promise<void> {
+    try {
+      await this.handleMessage(message);
+    } catch (error) {
+      console.error(formatBridgeFailure("Discord", error));
     }
-
-    this.stopped = true;
-    this.bridgeRuntime.stopBackgroundServices();
-    this.client.removeAllListeners();
-    this.client.destroy();
   }
 
   private async handleCommandInteraction(

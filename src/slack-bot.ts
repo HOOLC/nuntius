@@ -9,6 +9,7 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { SlackAdapter, type SlackEnvelope } from "./adapters/slack.js";
+import { ActiveTaskTracker } from "./active-task-tracker.js";
 import {
   formatBridgeFailure,
   formatSessionReconciliationLines,
@@ -28,6 +29,10 @@ import {
   runModuleWithRestartGuard
 } from "./process-guard.js";
 import { maybeRelaunchCurrentProcessPersistently } from "./persistent-launch.js";
+import {
+  deriveRecentIdStorePath,
+  FileRecentIdStore
+} from "./recent-id-store.js";
 import { loadSlackBotConfig, type SlackBotConfig } from "./slack-config.js";
 import type { Attachment, ProcessingStatus } from "./domain.js";
 
@@ -110,10 +115,15 @@ export class SlackBot {
   private slackConfig = loadSlackBotConfig();
   private slackApi = new SlackWebApiClient(this.slackConfig.botToken, this.slackConfig.apiBaseUrl);
   private readonly adapter = new SlackAdapter(this.bridgeRuntime.router);
-  private readonly recentEventIds = new Map<string, number>();
+  private readonly recentEventIds = new FileRecentIdStore(
+    deriveRecentIdStorePath(this.bridgeRuntime.config.sessionStorePath, "slack-events"),
+    EVENT_DEDUP_TTL_MS
+  );
+  private readonly activeTasks = new ActiveTaskTracker();
   private server?: Server;
   private botUserId?: string;
   private botTeamId?: string;
+  private stopping = false;
 
   async start(): Promise<void> {
     const sessionRefresh = await this.bridgeRuntime.reconcileSessionBindings();
@@ -123,7 +133,7 @@ export class SlackBot {
     this.installSignalHandlers();
 
     this.server = createServer((request, response) => {
-      void this.handleHttpRequest(request, response);
+      void this.activeTasks.track(this.handleHttpRequest(request, response));
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -139,25 +149,29 @@ export class SlackBot {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     this.bridgeRuntime.stopBackgroundServices();
 
-    if (!this.server) {
-      return;
+    if (this.server) {
+      const activeServer = this.server;
+      this.server = undefined;
+
+      await new Promise<void>((resolve, reject) => {
+        activeServer.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve();
+        });
+      });
     }
 
-    const activeServer = this.server;
-    this.server = undefined;
-
-    await new Promise<void>((resolve, reject) => {
-      activeServer.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve();
-      });
-    });
+    const drainResult = await this.activeTasks.drain();
+    if (drainResult === "timed_out") {
+      console.warn("Slack bot shutdown timed out while waiting for active turns to finish.");
+    }
   }
 
   private installSignalHandlers(): void {
@@ -269,7 +283,7 @@ export class SlackBot {
       return;
     }
 
-    if (this.isDuplicateEvent(envelope.event_id)) {
+    if (await this.isDuplicateEvent(envelope.event_id)) {
       return;
     }
 
@@ -784,25 +798,12 @@ export class SlackBot {
     return this.slackConfig.adminUserIds.includes(userId);
   }
 
-  private isDuplicateEvent(eventId: string | undefined): boolean {
-    const now = Date.now();
-
-    for (const [existingEventId, seenAt] of this.recentEventIds.entries()) {
-      if (now - seenAt > EVENT_DEDUP_TTL_MS) {
-        this.recentEventIds.delete(existingEventId);
-      }
-    }
-
-    if (!eventId) {
-      return false;
-    }
-
-    if (this.recentEventIds.has(eventId)) {
+  private async isDuplicateEvent(eventId: string | undefined): Promise<boolean> {
+    if (this.stopping) {
       return true;
     }
 
-    this.recentEventIds.set(eventId, now);
-    return false;
+    return this.recentEventIds.rememberIfNew(eventId);
   }
 }
 

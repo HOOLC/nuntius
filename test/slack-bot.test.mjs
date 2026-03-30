@@ -215,6 +215,42 @@ test("thread system prompts use Chinese when the stored conversation language is
   assert.equal(harness.records[0].body.text, "请回复一条发给 Codex 的消息，或使用 `/codex help`。");
 });
 
+test("duplicate Slack events stay deduped after a bot restart", async (t) => {
+  const harness = createHarness();
+  t.after(() => harness.cleanup());
+
+  const event = Buffer.from(
+    JSON.stringify({
+      type: "event_callback",
+      team_id: "T111",
+      event_id: "evt-restart-1",
+      event: {
+        type: "message",
+        user: "U111",
+        text: "/codex help",
+        channel: "D222",
+        channel_type: "im",
+        ts: "1710000010.000100"
+      }
+    })
+  );
+
+  const firstBot = new SlackBot();
+  await firstBot.refreshSlackClient();
+  harness.resetRecords();
+
+  await firstBot.handleEventRequest(event, createResponseRecorder());
+  assert.equal(harness.records.length, 1);
+
+  const secondBot = new SlackBot();
+  await secondBot.refreshSlackClient();
+  harness.resetRecords();
+
+  await secondBot.handleEventRequest(event, createResponseRecorder());
+  assert.deepEqual(harness.records, []);
+  assert.deepEqual(harness.reactionRecords, []);
+});
+
 function createHarness() {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-slack-test-"));
   const repoDir = path.join(root, "repo");
