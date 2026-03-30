@@ -1,5 +1,39 @@
 # nuntius
 
+## Quick Start
+
+The fastest path is usually: let an agent do the setup for you.
+
+Tell Codex to read this repo's setup docs and bootstrap the service on your machine.
+
+### Let Codex do the full setup
+
+Run Codex from the repo root and give it a prompt like this:
+
+```text
+Read README.md and README.agent.md in this repository. Set up nuntius on this machine. Install dependencies, create nuntius.toml from config/nuntius.example.toml, create config/repository-registry.toml from config/repository-registry.example.toml, ask me for any missing credentials or repository paths, then build, test, and start the integration I choose.
+```
+
+### Let Codex prepare the config first
+
+If you want the agent to stop before launching anything:
+
+```text
+Read README.md and README.agent.md in this repository. Prepare nuntius.toml and config/repository-registry.toml for this machine, but do not start the service until I confirm the credentials and repository paths.
+```
+
+### Let Codex validate an existing install
+
+If you already have config and want a verification pass:
+
+```text
+Read README.md and README.agent.md in this repository. Verify this nuntius installation end to end, including config, repository registry, build, tests, and platform-specific setup, then tell me exactly what is missing.
+```
+
+The agent-oriented setup cookbook lives in [README.agent.md](README.agent.md).
+
+## Introduction
+
 nuntius is a Node.js and TypeScript bridge that lets Slack, Discord, and Feishu users talk to Codex from chat.
 
 It is designed for two different kinds of work in the same thread:
@@ -95,7 +129,7 @@ Platform-specific setup guides live here:
 - Codex CLI installed and available as `codex`, or configured through `bridge.codex_binary`
 - Chat platform credentials for whichever integration you want to run
 
-## Quick Start
+## Manual Setup
 
 ### 1. Install dependencies
 

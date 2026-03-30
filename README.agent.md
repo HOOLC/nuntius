@@ -1,337 +1,293 @@
 # README.agent.md
 
-This document is for an agent, operator, or automation worker that needs to understand, run, or modify nuntius quickly and correctly.
+This file is the cookbook an agent should follow to install, configure, bootstrap, verify, and hand off nuntius.
 
-The short version:
+If you are the agent doing the setup, work through the steps in order. Do not improvise the routing model. Read the design doc first.
 
-- read the design doc first
-- configure `nuntius.toml`
-- build before running
-- edit `src/`, never `dist/`
-- test changes before finishing
+## Goal
 
-## Read Order
+Bring up nuntius as a working Codex bridge for one or more of:
 
-Use this order when loading context:
+- Slack
+- Discord
+- Feishu
+
+The service should end in a state where:
+
+- dependencies are installed
+- `nuntius.toml` exists and points at valid repository targets
+- required platform credentials are present
+- the project builds cleanly
+- the requested integration starts successfully
+- any platform-specific post-step, such as Discord command registration, is completed
+
+## What You Must Read First
+
+Read these before editing config or starting the service:
 
 1. [docs/im-codex-bridge-design.md](docs/im-codex-bridge-design.md)
 2. [AGENTS.md](AGENTS.md)
 3. [config/nuntius.example.toml](config/nuntius.example.toml)
 4. [config/repository-registry.example.toml](config/repository-registry.example.toml)
-5. Platform setup docs if the task is integration-specific:
+5. Integration-specific docs as needed:
    - [docs/slack-setup.md](docs/slack-setup.md)
    - [docs/discord-setup.md](docs/discord-setup.md)
    - [docs/feishu-setup.md](docs/feishu-setup.md)
 
-## Mental Model
+## Inputs You Need From The Human
 
-One thread can hold two different Codex surfaces:
+Do not guess these. Ask for them explicitly if missing.
 
-- handler session: conversational front-end before binding
-- worker session: repo-scoped session after binding
+### Always Required
 
-Important invariants:
+- which integration or integrations to enable
+- absolute local paths for each repository target
+- which repository should be the default
+- whether the operator accepts the default yolo mode
 
-- unbound threads route through the handler
-- bound threads route straight to the worker
-- rebinding clears the old worker session
-- reset scope matters
-- scheduled tasks are background jobs created from conversational requests
-- worker wake requests are delayed continuations of the same worker session
+### Slack
 
-If you are about to change routing, read `src/service.ts` and `src/service-state.ts` before writing code.
+- bot token
+- signing secret
+- allowed Slack user IDs
+- admin Slack user IDs
+- public HTTPS base URL for slash commands and events
 
-## Setup for Local Work
+### Discord
 
-### Prerequisites
+- bot token
+- application ID
+- optional guild ID for guild-scoped command registration
+- allowed Discord user IDs
+- admin Discord user IDs
 
-- Node.js 22 or newer
-- npm
-- Codex CLI installed locally
-- platform credentials only if you need to run real Slack, Discord, or Feishu integrations
+### Feishu
 
-### Install
+- app ID
+- app secret
+- allowed open IDs
+- admin open IDs
+
+## Important Runtime Defaults
+
+Do not miss these:
+
+- `bridge.yolo_mode` defaults to `true`.
+- In yolo mode, all handler and worker turns are forced to `danger-full-access` with `approvalPolicy: never`.
+- Repository targets default to `allow_codex_network_access = true`.
+- Worker turns request web access with `codex --search` unless disabled per repository.
+- `bridge.progress_updates` defaults to `minimal`.
+
+If the human expects repository-level sandbox or approval settings to matter, set `bridge.yolo_mode = false`.
+
+## Bootstrap Procedure
+
+### 1. Verify prerequisites
+
+Run:
+
+```bash
+node -v
+npm -v
+codex --version
+```
+
+If `codex` is not on `PATH`, either stop and ask for the correct binary path or set `bridge.codex_binary` later.
+
+### 2. Install dependencies
+
+From the repo root:
 
 ```bash
 npm install
 ```
 
-### Create config
+### 3. Create config files
+
+If they do not already exist:
 
 ```bash
 cp config/nuntius.example.toml nuntius.toml
 cp config/repository-registry.example.toml config/repository-registry.toml
 ```
 
-Then set:
-
-- repository paths that exist on the current machine
-- platform credentials
-- allowed users / admin users
-- any registry path override
-
-If you want to keep config elsewhere:
+If the operator wants config elsewhere, set:
 
 ```bash
 export NUNTIUS_CONFIG_PATH=/absolute/path/to/nuntius.toml
 ```
 
-### Build
+### 4. Fill `nuntius.toml`
+
+At minimum, confirm or edit:
+
+- `[bridge].default_repository_id`
+- `[bridge].handler_workspace_path`
+- `[bridge].session_store_path`
+- `[bridge].repository_registry_path`
+- `bridge.yolo_mode`
+- the requested platform sections
+
+Use [config/nuntius.example.toml](config/nuntius.example.toml) as the template of truth.
+
+### 5. Fill the repository registry
+
+Add one `[[repository_targets]]` entry per repository you want nuntius to expose.
+
+Every target needs:
+
+- `id`
+- `path`
+- `sandbox_mode`
+
+Optional per-target policy:
+
+- `approval_policy`
+- `allow_users`
+- `allow_channels`
+- `allow_codex_network_access`
+- `codex_network_access_workspace_path`
+- `codex_config_overrides`
+
+Use [config/repository-registry.example.toml](config/repository-registry.example.toml) as the template of truth.
+
+### 6. Build
 
 ```bash
 npm run build
 ```
 
-### Run
+### 7. Run validation
 
-Local simulator:
+At minimum:
+
+```bash
+npm run typecheck
+npm test
+```
+
+If the operator wants only a smoke test before real credentials are used, you can also run:
 
 ```bash
 npm run im:local
 ```
 
-Slack:
+### 8. Do platform-specific setup
+
+#### Slack
+
+- confirm slash command endpoints match `command_path`
+- confirm event subscription URL matches `events_path`
+- confirm the app has the required scopes from [docs/slack-setup.md](docs/slack-setup.md)
+
+Start it with:
 
 ```bash
 npm run slack:start
 ```
 
-Discord:
+#### Discord
+
+Build first, then register commands:
+
+```bash
+npm run build
+npm run discord:register
+```
+
+Start it with:
 
 ```bash
 npm run discord:start
 ```
 
-Feishu:
+#### Feishu
+
+Confirm the app is configured for long connection event delivery and has the required permissions from [docs/feishu-setup.md](docs/feishu-setup.md).
+
+Start it with:
 
 ```bash
 npm run feishu:start
 ```
 
-All configured integrations:
+#### All configured integrations
 
 ```bash
 npm run start
 ```
 
-### Test
+### 9. Verify live behavior
 
-```bash
-npm run typecheck
-npm test
+Use the relevant platform flow:
+
+- Slack DM or slash command
+- Discord slash command, DM, or mention
+- Feishu DM or mention in a group
+
+Minimum expected checks:
+
+- `/codex help` or equivalent works
+- `/codex repos` lists the configured repositories
+- binding to a repository works
+- a follow-up message in the same thread routes to the worker session
+
+## Hand-Off Checklist
+
+Before you say setup is complete, confirm:
+
+- config files are in place
+- repository paths are correct on disk
+- the requested integration process starts without immediate failure
+- tests or at least build/typecheck ran successfully
+- any required Discord command registration was completed
+- the operator knows how to restart the service under their supervisor
+
+## Suggested Prompts An Agent Can Follow
+
+### Full bootstrap
+
+Use this if the human wants you to do the setup end to end:
+
+```text
+Read README.agent.md, docs/im-codex-bridge-design.md, and the platform setup docs you need. Install dependencies, create nuntius.toml plus config/repository-registry.toml from the examples, ask me for any missing credentials or repository paths, then build, test, and start the requested integration.
 ```
 
-## Runtime Defaults You Must Not Miss
+### Config-only bootstrap
 
-- `bridge.yolo_mode` defaults to `true`.
-- In yolo mode, all handler and worker turns are forced to `danger-full-access` and `approvalPolicy: never`.
-- Repository targets default to `allow_codex_network_access = true`.
-- Worker turns with network access request `codex --search`.
-- `bridge.progress_updates` defaults to `minimal`.
+Use this if the human is not ready to start the service yet:
 
-If a user asks why sandbox or approval settings are not taking effect, check whether `bridge.yolo_mode` is still enabled.
-
-## Repository Layout
-
-These files carry most of the system behavior:
-
-- `src/service.ts`
-  - main orchestration
-  - queueing
-  - handler/worker routing
-  - reset and interrupt logic
-  - scheduled tasks
-  - wake-up turns
-- `src/service-state.ts`
-  - conversation binding state
-  - handler config reconciliation
-  - worker prompt helpers
-- `src/codex-runner.ts`
-  - Codex app-server transport
-  - session lifecycle
-  - interrupt handling
-  - `--search` behavior
-  - sandbox and approval overrides
-- `src/interaction-router.ts`
-  - `/codex` command parsing
-  - status/help output
-- `src/slack-bot.ts`
-  - Slack HTTP entrypoint
-  - events, slash commands, replies, reactions
-- `src/discord-bot-worker.ts`
-  - Discord gateway worker
-  - slash commands, thread behavior, admin flows
-- `src/feishu-bot.ts`
-  - Feishu long connection client
-  - group-thread and DM behavior
-- `src/worker-supervisor.ts`
-  - hot reload worker replacement
-- `src/process-guard.ts`
-  - restart guard
-- `src/persistent-launch.ts`
-  - optional `systemd-run` handoff
-
-Other important areas:
-
-- `config/`: sample runtime config and repository registry files
-- `docs/`: operator-facing design and setup docs
-- `test/`: Node test suite
-- `dist/`: generated output from `npm run build`
-
-## Change Map
-
-Use this when deciding where to edit and what else to update.
-
-### Routing or Session Changes
-
-Edit:
-
-- `src/service.ts`
-- `src/service-state.ts`
-- sometimes `src/interaction-router.ts`
-
-Usually update:
-
-- `docs/im-codex-bridge-design.md`
-- `test/service-routing.test.mjs`
-
-### Codex Launch, Sandbox, Network, or Approval Changes
-
-Edit:
-
-- `src/codex-runner.ts`
-- maybe `src/config.ts`
-
-Usually update:
-
-- config examples in `config/`
-- `test/codex-network-access.test.mjs`
-- any setup docs affected by the change
-
-### Slack Changes
-
-Edit:
-
-- `src/slack-bot.ts`
-- `src/adapters/slack.ts`
-
-Usually update:
-
-- `docs/slack-setup.md`
-- `test/slack-bot.test.mjs`
-
-### Discord Changes
-
-Edit:
-
-- `src/discord-bot-worker.ts`
-- `src/adapters/discord.ts`
-- `src/register-discord-commands.ts` if slash schema changes
-
-Usually update:
-
-- `docs/discord-setup.md`
-- relevant Discord tests
-- run `npm run discord:register` when deploying changed slash commands
-
-### Feishu Changes
-
-Edit:
-
-- `src/feishu-bot.ts`
-- `src/adapters/feishu.ts`
-
-Usually update:
-
-- `docs/feishu-setup.md`
-- `test/feishu-bot.test.mjs`
-- `test/feishu-adapter.test.mjs`
-
-## Scheduled Tasks and Wake-Ups
-
-There are two background mechanisms:
-
-### Scheduled Tasks
-
-- created from conversational handler requests
-- stored under `.nuntius/scheduled-tasks/<task-id>/` in the repository
-- executed later by fresh worker turns
-
-Relevant files:
-
-- `src/scheduled-task-store.ts`
-- `src/scheduled-task-scheduler.ts`
-- `src/scheduled-task-documents.ts`
-- `src/service.ts`
-
-### Worker Wake Requests
-
-- created by worker action tags like `[[ACTION:WAKE_AFTER(5m)]]`
-- tied to the current worker session
-- resumed later as background worker turns
-- not automatically posted back to chat
-
-Relevant files:
-
-- `src/worker-protocol.ts`
-- `src/worker-wake-scheduler.ts`
-- `src/service.ts`
-
-## Platform Behavior Summary
-
-### Slack
-
-- root channel messages only matter when the bot is mentioned
-- DMs are persistent conversations directly
-- thread replies continue existing state
-- slash commands are supported
-- needs public HTTPS endpoints
-
-### Discord
-
-- slash commands are primary for ask/bind/admin
-- guild mentions can create threads automatically
-- DMs and thread replies continue persistent state
-- command schema changes need `npm run discord:register`
-
-### Feishu
-
-- group root messages only trigger on mention or `/codex`
-- persistent work is moved into a Feishu thread
-- later thread replies continue the same state
-- no public callback URL is required because it uses long connection mode
-
-## Agent Rules While Editing
-
-- Edit source under `src/`.
-- Never hand-edit `dist/`.
-- Keep English and Chinese user-facing strings aligned if you touch localized output.
-- Prefer updating tests in the same change when behavior shifts.
-- If a change touches config keys, commands, or routing rules, update the matching docs and config examples.
-
-## Typical Agent Workflow
-
-1. Read the design doc and the specific integration/setup doc.
-2. Inspect the relevant `src/` modules.
-3. Make edits in `src/`.
-4. Update tests and docs affected by the behavior change.
-5. Run:
-
-```bash
-npm run typecheck
-npm test
+```text
+Read README.agent.md and prepare nuntius.toml plus config/repository-registry.toml for this machine. Do not launch anything until you have asked me for all missing credentials, allowed-user lists, and repository paths.
 ```
 
-6. Report exactly what changed and what was verified.
+### Validate an existing install
 
-## Operational Notes
+```text
+Read README.agent.md and verify this nuntius deployment. Check config paths, repository registry entries, build, typecheck, tests, and the platform-specific runtime prerequisites. Tell me exactly what is missing or misconfigured.
+```
 
-- `restart` exits the process. A supervisor still has to bring it back.
-- `hotreload` is available only where the bundled supervisor is in use.
-- The bridge persists session state in `session_store_path`.
-- The repository registry can be reloaded in-process through admin commands.
-- A repo target can restrict access with `allow_users` and `allow_channels`.
+## Repo Map For Follow-Up Work
 
-## If You Need a Short Human Overview
+After setup, these files matter most for maintenance:
+
+- `src/service.ts`: orchestration, routing, resets, interrupts, wake-ups, scheduled tasks
+- `src/service-state.ts`: binding state and prompt helpers
+- `src/codex-runner.ts`: Codex launch/session behavior
+- `src/slack-bot.ts`: Slack entrypoint
+- `src/discord-bot-worker.ts`: Discord entrypoint
+- `src/feishu-bot.ts`: Feishu entrypoint
+- `src/worker-supervisor.ts`, `src/process-guard.ts`, `src/persistent-launch.ts`: reload/restart behavior
+- `test/`: regression coverage
+
+## Editing Rules If Setup Turns Into Development
+
+- edit `src/`, not `dist/`
+- keep English and Chinese user-facing strings aligned
+- update tests when behavior changes
+- update docs and config examples when commands, routing, or config keys change
+- run `npm run typecheck` and `npm test` before finishing a code change
+
+## If You Need The Human Overview
 
 Use [README.md](README.md).
