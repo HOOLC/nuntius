@@ -120,7 +120,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 ### Slash Commands
 
 - `/codex <message>` starts or continues a Codex conversation
-- `/codex bind <repo-id>` creates a thread if needed and binds it
+- `/codex bind <repo-id> [message]` creates a thread if needed, binds it, and immediately runs `[message]` when present
 - `/codex status`
 - `/codex repos`
 - `/codex tasks`

@@ -13,7 +13,10 @@ import {
   buildInboundTurn,
   createProcessingStatusSynchronizer
 } from "./shared.js";
-import { trimCodeFencePayload } from "../text-formatting.js";
+import {
+  formatFeishuMessageText,
+  trimCodeFencePayload
+} from "../text-formatting.js";
 
 export interface FeishuChatMessage {
   msgType: "file" | "interactive" | "text";
@@ -161,21 +164,9 @@ class FeishuPublisher implements TurnPublisher {
 
   async refreshWorkingIndicator(
     _turn: InboundTurn,
-    language: ConversationLanguage
+    _language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
-    await this.setProgressMessage(
-      renderFeishuStatus(
-        localize(language, {
-          en: "Working",
-          zh: "处理中"
-        }),
-        localize(language, {
-          en: `Still working. Last update: ${formatFeishuWorkingTimestamp(new Date())}`,
-          zh: `仍在处理中。最近更新：${formatFeishuWorkingTimestamp(new Date())}`
-        })
-      )
-    );
   }
 
   async hideWorkingIndicator(
@@ -206,7 +197,7 @@ export function renderFeishuTextMessage(text: string): FeishuChatMessage {
   return {
     msgType: "text",
     content: JSON.stringify({
-      text
+      text: formatFeishuMessageText(text).trim()
     })
   };
 }
@@ -262,11 +253,6 @@ function renderFeishuError(
       trimCodeFencePayload(errorMessage)
     ].join("\n")
   );
-}
-
-function formatFeishuWorkingTimestamp(value: Date): string {
-  const iso = value.toISOString();
-  return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`;
 }
 
 function formatAttachmentFailure(error: unknown): string {

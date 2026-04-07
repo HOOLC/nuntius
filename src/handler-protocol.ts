@@ -2,6 +2,7 @@ import { formatAttachmentsForPrompt } from "./attachments.js";
 import { describeConversationLanguage } from "./conversation-language.js";
 import type { RepositoryTarget } from "./config.js";
 import type { ConversationBinding, ConversationLanguage, InboundTurn } from "./domain.js";
+import { buildImReplyFormatRules } from "./im-response-format.js";
 
 export type HandlerControlAction =
   | {
@@ -67,11 +68,16 @@ export function buildHandlerUserPrompt(input: {
     '- Treat conversational control phrases like "work on <repo-id>", "switch to <repo-id>", or "bind this thread to <repo-id>" as explicit repository-binding requests.',
     '- When the user says "work on <repo-id>" without a concrete task, emit [[ACTION:BIND(repo-id)]] and keep the visible reply short. Do not invent repo work.',
     '- When the user explicitly names a repository and also wants immediate repo work, emit [[ACTION:BIND(repo-id)]] followed by [[ACTION:DELEGATE(worker prompt)]].',
+    "- If the user names a repository and a concrete task in the same message, do not stop at BIND. Bind first and delegate the task in the same reply.",
+    "- Concrete repo work includes summaries, status checks, inspections, debugging, reviewing, test triage, code changes, and similar actionable requests.",
+    '- Example: "Summarize arbitero\'s current status." -> [[ACTION:BIND(arbitero)]] then [[ACTION:DELEGATE(Summarize arbitero\'s current status.)]].',
+    '- Example: "总结一下 arbitero 的现状。" -> [[ACTION:BIND(arbitero)]] then [[ACTION:DELEGATE(总结 arbitero 当前的现状。)]].',
     '- When the user wants a recurring or scheduled background task, emit [[ACTION:SCHEDULE(...)]] with repositoryId, a canonical schedule string like "every 1 hour", and a concise taskPrompt.',
     "- If the repository or schedule for a scheduled task request is ambiguous, ask a clarification question instead of guessing.",
     '- For conversational requests like "what repo is this bound to?", "what repos are available?", or "how do I use this?", answer with reply using the current state below instead of asking for more detail.',
     '- For conversational reset requests like "reset this thread", "clear context", or "start over", emit RESET with the closest matching scope.',
     "- Use reply for clarification, conversational answers, repo questions, and status-style answers.",
+    ...buildImReplyFormatRules(turn.platform),
     `- Reply to the user in ${describeConversationLanguage(conversationLanguage)}.`,
     `- Explicit repository selection required: ${String(requireExplicitRepositorySelection)}.`,
     "",

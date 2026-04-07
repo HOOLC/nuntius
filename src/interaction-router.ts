@@ -26,6 +26,7 @@ export type BridgeCommand =
   | {
       kind: "bind";
       repositoryId: string;
+      text?: string;
     }
   | {
       kind: "reset";
@@ -93,7 +94,17 @@ export class InteractionRouter {
         return;
       }
       case "bind": {
-        const binding = await this.bridge.bindConversation(turn, command.repositoryId);
+        const bindTurn = command.text
+          ? {
+              ...turn,
+              text: command.text
+            }
+          : turn;
+        const binding = await this.bridge.bindConversation(bindTurn, command.repositoryId);
+        if (command.text) {
+          await this.bridge.handleTurn(bindTurn, publisher);
+          return;
+        }
         const bindLanguage = resolveConversationLanguage({
           binding,
           text: turn.text
@@ -162,16 +173,27 @@ export function parseBridgeCommand(text: string): BridgeCommand {
       return {
         kind: "tasks"
       };
-    case "bind":
-      if (tail[0]) {
+    case "bind": {
+      const bindMatch = rest.match(/^bind\s+(\S+)([\s\S]*)$/);
+      if (!bindMatch) {
         return {
-          kind: "bind",
-          repositoryId: tail[0]
+          kind: "help"
         };
       }
-      return {
-        kind: "help"
-      };
+
+      const [, repositoryId, promptTail] = bindMatch;
+      const bindPrompt = promptTail.trim();
+      return bindPrompt
+        ? {
+            kind: "bind",
+            repositoryId,
+            text: bindPrompt
+          }
+        : {
+            kind: "bind",
+            repositoryId
+          };
+    }
     case "reset":
     case "clear":
       return {
@@ -208,7 +230,10 @@ function buildHelpMessage(language: ConversationLanguage): string {
     "/codex status",
     "/codex repos",
     "/codex tasks",
-    "/codex bind <repo-id>",
+    localize(language, {
+      en: "/codex bind <repo-id> [message] -> bind the conversation; if [message] is present, run it immediately",
+      zh: "/codex bind <repo-id> [消息] -> 先绑定会话；如果带了[消息]，会立刻在该仓库中执行"
+    }),
     "/codex reset [worker|binding|context|all]",
     localize(language, {
       en: "/codex interrupt  -> interrupt the active Codex turn in this conversation",

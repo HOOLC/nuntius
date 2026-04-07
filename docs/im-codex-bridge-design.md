@@ -262,6 +262,14 @@ Recommended behavior:
 - no repo bound: the handler can converse and ask questions, but cannot start repo work until the repository is explicit
 - repo bound: normal plain-text replies go directly to the worker session for that repository
 - user asks to switch repos: the user should do that explicitly with `bind_repo` or `/codex bind`, which updates the thread binding and clears the old worker session
+- explicit `/codex bind <repo-id> <message>` should bind first and then route `<message>` straight into the new repo-scoped worker turn
+- natural-language requests that already contain both a repository and a concrete repo task, such as `总结一下 arbitero 的现状`, should also bind first and then delegate the task immediately
+
+Reply formatting should stay IM-friendly:
+
+- handler and worker prompts should tell Codex not to use Markdown tables in user-visible chat replies
+- prefer short paragraphs, simple lists, and fenced code blocks instead of layout-heavy Markdown
+- Feishu delivery may additionally rewrite leftover Markdown into plain-text-friendly output before posting it
 
 This is the right place for conversational repo selection:
 
@@ -326,6 +334,7 @@ Useful explicit commands:
 - `/codex tasks`
 - `/codex reset`
 - `/codex bind nuntius`
+- `/codex bind nuntius summarize the current TODOs`
 
 Those commands are optional convenience. The main UX can still be conversational.
 

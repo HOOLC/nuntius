@@ -370,12 +370,35 @@ test("thread file attachments are downloaded, exposed to Codex, and returned as 
 
   await waitFor(() =>
     harness.records.some(
-      (record) => record.kind === "message.reply" && record.body.msg_type === "file"
+      (record) =>
+        record.kind === "message.reply" &&
+        record.body.msg_type === "text" &&
+        readTextContent(record).includes("Saved the attachment from this message.")
     )
   );
 
   const downloaded = harness.records.find((record) => record.kind === "message.resource.get");
   assert.equal(downloaded?.query, "type=file");
+
+  harness.resetRecords();
+
+  bot.handleIncomingLongConnectionEvent(
+    buildMessageEvent({
+      eventId: "evt-thread-file-follow-up",
+      messageId: "om-thread-file-2",
+      rootId: "om-root-file",
+      threadId: "omt-thread-1",
+      chatId: "oc-chat-1",
+      chatType: "group",
+      text: "please update this document"
+    })
+  );
+
+  await waitFor(() =>
+    harness.records.some(
+      (record) => record.kind === "message.reply" && record.body.msg_type === "file"
+    )
+  );
 
   const upload = harness.records.find((record) => record.kind === "file.upload");
   assert.equal(upload?.body.file_type, "stream");

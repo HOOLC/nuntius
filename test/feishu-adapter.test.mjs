@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { FeishuAdapter } from "../dist/adapters/feishu.js";
 
-test("Feishu reuses one progress message for heartbeats and progress updates, then posts the final reply separately", async () => {
+test("Feishu heartbeats do not emit generic progress text and do not overwrite tool-call updates", async () => {
   const postedMessages = [];
   const updatedMessages = [];
   let acknowledged = 0;
@@ -13,15 +13,24 @@ test("Feishu reuses one progress message for heartbeats and progress updates, th
       assert.equal(acknowledged, 1);
 
       await publisher.refreshWorkingIndicator?.(turn);
+      assert.equal(postedMessages.length, 0);
+      assert.equal(updatedMessages.length, 0);
+
+      await publisher.publishProgress(turn, "1 command ran.");
       assert.equal(postedMessages.length, 1);
       assert.equal(updatedMessages.length, 0);
 
       await publisher.refreshWorkingIndicator?.(turn);
       assert.equal(postedMessages.length, 1);
+      assert.equal(updatedMessages.length, 0);
+
+      await publisher.publishProgress(turn, "1 command ran, 2 file changes.");
       assert.equal(updatedMessages.length, 1);
 
-      await publisher.publishProgress(turn, "1 command ran.");
-      await publisher.publishProgress(turn, "1 command ran, 2 file changes.");
+      await publisher.refreshWorkingIndicator?.(turn);
+      assert.equal(postedMessages.length, 1);
+      assert.equal(updatedMessages.length, 1);
+
       await publisher.publishCompleted(turn, {
         text: "Finished.",
         truncated: false
@@ -52,26 +61,77 @@ test("Feishu reuses one progress message for heartbeats and progress updates, th
     }
   });
 
-  assert.match(
-    JSON.parse(postedMessages[0].content).text,
-    /\[Working\]\nStill working\. Last update: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/
-  );
   assert.equal(postedMessages.length, 2);
+  assert.equal(JSON.parse(postedMessages[0].content).text, "1 command ran.");
   assert.equal(JSON.parse(postedMessages[1].content).text, "Finished.");
-  assert.equal(updatedMessages.length, 3);
+  assert.equal(updatedMessages.length, 1);
   assert.equal(updatedMessages[0].messageId, "om-working-1");
-  assert.match(
+  assert.equal(
     JSON.parse(updatedMessages[0].message.content).text,
-    /\[Working\]\nStill working\. Last update: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/
-  );
-  assert.equal(updatedMessages[1].messageId, "om-working-1");
-  assert.equal(
-    JSON.parse(updatedMessages[1].message.content).text,
-    "1 command ran."
-  );
-  assert.equal(updatedMessages[2].messageId, "om-working-1");
-  assert.equal(
-    JSON.parse(updatedMessages[2].message.content).text,
     "1 command ran, 2 file changes."
+  );
+});
+
+test("Feishu rewrites markdown into plain-text-friendly output", async () => {
+  const postedMessages = [];
+
+  const adapter = new FeishuAdapter({
+    async handleTurn(turn, publisher) {
+      await publisher.publishCompleted(turn, {
+        text: [
+          "## Summary",
+          "",
+          "Touched [src/adapters/feishu.ts](/home/nomofu/nuntius/src/adapters/feishu.ts#L42).",
+          "See [design doc](https://example.com/design).",
+          "",
+          "| File | Status |",
+          "| --- | --- |",
+          "| README.md | updated |",
+          "| docs/feishu-setup.md | added |",
+          "",
+          "**Next**:",
+          "* keep this short",
+          "",
+          "```md",
+          "| leave | as-is |",
+          "```"
+        ].join("\n"),
+        truncated: false
+      });
+    }
+  });
+
+  await adapter.handleTurn({
+    workspaceId: "feishu:workspace",
+    channelId: "chat-1",
+    scope: "thread",
+    userId: "ou-user-1",
+    text: "format this",
+    acknowledge: async () => undefined,
+    postMessage: async (message) => {
+      postedMessages.push(message);
+      return {};
+    }
+  });
+
+  assert.equal(postedMessages.length, 1);
+  assert.equal(
+    JSON.parse(postedMessages[0].content).text,
+    [
+      "Summary",
+      "",
+      "Touched src/adapters/feishu.ts:42.",
+      "See design doc: https://example.com/design.",
+      "",
+      "- File: README.md; Status: updated",
+      "- File: docs/feishu-setup.md; Status: added",
+      "",
+      "Next:",
+      "- keep this short",
+      "",
+      "```md",
+      "| leave | as-is |",
+      "```"
+    ].join("\n")
   );
 });

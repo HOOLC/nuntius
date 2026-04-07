@@ -107,7 +107,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 ### Message Commands
 
 - `/codex <message>`
-- `/codex bind <repo-id>`
+- `/codex bind <repo-id> [message]`
 - `/codex status`
 - `/codex repos`
 - `/codex tasks`
@@ -128,10 +128,12 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - DM the bot directly to keep one Codex conversation per p2p chat
 - Mention the bot in a group message to create a dedicated Feishu thread automatically
 - Reply inside that Feishu thread to continue the same handler or worker session
+- nuntius tells Codex to avoid Markdown tables in chat replies and prefer short paragraphs, lists, and code blocks that read cleanly in IM clients
 
 ### Document Attachments
 
 - In a DM or an already-bound thread, send a `doc` or `docx` file and then tell Codex what to change
+- If you send the attachment first with no text, nuntius stores it in the conversation and waits for your next text instruction before starting Codex work
 - nuntius downloads the attachment to a local working path and exposes that path to Codex for the turn
 - If Codex modifies an attached `.doc` or `.docx` in place, or writes a new `.doc`/`.docx` beside it in the same attachment directory, nuntius uploads that file back to Feishu as a file message
 - Feishu file uploads are limited to 30 MB; larger returned documents will fail to upload and the bot will post an error in the thread instead
@@ -142,7 +144,9 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - If `feishu.admin_open_ids` is set, only those users can run `/codexadmin`.
 - Root group messages only trigger the bot when they start with `/codex` or mention the bot.
 - Persistent work in a group is moved into a Feishu thread automatically; later replies in that thread reuse the same bound worker session.
+- `/codex bind <repo-id> <message>` binds the thread first and then sends `<message>` straight to that repository worker in the same turn.
 - In an unbound top-level conversation, plain text like `create a task running per hour in arbitero` lets the handler create a scheduled background task under `.nuntius/scheduled-tasks/<task-id>/` for that repository without binding the thread.
+- Feishu delivery rewrites leftover Markdown links, headings, emphasis, and tables into plain-text-friendly output before posting the message.
 - nuntius adds status reactions to inbound Feishu messages when the bot can address the source message directly.
 - File attachments received in a conversation remain available to later turns in that conversation unless you clear the binding with `/codex reset binding` or `/codex reset all`.
 - `/codexadmin reloadconfig` reloads the bridge config and repository registry in-process.

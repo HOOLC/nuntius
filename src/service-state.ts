@@ -16,6 +16,7 @@ import type {
   SandboxMode
 } from "./domain.js";
 import { toConversationKey } from "./domain.js";
+import { buildImReplyFormatRules } from "./im-response-format.js";
 import { sanitizeUserFacingText } from "./user-facing-text.js";
 import { WAKE_AFTER_ACTION_USAGE } from "./worker-protocol.js";
 
@@ -263,7 +264,8 @@ export function buildWorkerPrompt(
     "- Action tags are stripped from the user-visible reply.",
     "- When the timer fires, nuntius resumes this same worker session in the background with a wake-up prompt.",
     "- Background wake-up turns are not automatically posted back to chat, so use them for waiting, polling, monitoring, and follow-up work.",
-    ""
+    "",
+    ...buildImReplyFormatRules(turn.platform)
   );
 
   lines.push("User task:");

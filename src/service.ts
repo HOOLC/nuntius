@@ -168,6 +168,13 @@ export class CodexBridgeService {
           await this.sessionStore.upsert(binding);
         }
 
+        if (this.shouldWaitForAttachmentInstructions(turn)) {
+          await publisher.publishCompleted(turn, {
+            text: this.buildAttachmentInstructionMessage(turn.attachments.length, language)
+          }, language);
+          return;
+        }
+
         if (binding.activeRepository) {
           const outcome = await this.completeWorkerTurn(
             effectiveTurn,
@@ -1271,6 +1278,27 @@ export class CodexBridgeService {
         "请先使用 `/codex bind <repo-id>` 或直接说“切换到 <repo-id>”来完成绑定，或者在消息里明确提到仓库，让 handler 帮你绑定。",
         `可用仓库：${available.join(", ")}。`
       ].join(" ")
+    });
+  }
+
+  private shouldWaitForAttachmentInstructions(turn: InboundTurn): boolean {
+    return turn.attachments.length > 0 && turn.text.trim().length === 0;
+  }
+
+  private buildAttachmentInstructionMessage(
+    attachmentCount: number,
+    language: ConversationLanguage
+  ): string {
+    if (attachmentCount === 1) {
+      return localize(language, {
+        en: "Saved the attachment from this message. Send another message telling Codex what to do, and the next turn will include it.",
+        zh: "已保存这条消息里的附件。请再发一条消息告诉 Codex 要做什么，下一次处理时会自动带上它。"
+      });
+    }
+
+    return localize(language, {
+      en: `Saved the ${attachmentCount} attachments from this message. Send another message telling Codex what to do, and the next turn will include them.`,
+      zh: `已保存这条消息里的 ${attachmentCount} 个附件。请再发一条消息告诉 Codex 要做什么，下一次处理时会自动带上它们。`
     });
   }
 

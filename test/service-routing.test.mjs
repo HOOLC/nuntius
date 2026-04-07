@@ -5,8 +5,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { CodexTurnInterruptedError } from "../dist/codex-runner.js";
+import { buildHandlerUserPrompt } from "../dist/handler-protocol.js";
 import { InteractionRouter, parseBridgeCommand } from "../dist/interaction-router.js";
 import { CodexBridgeService } from "../dist/service.js";
+import { buildWorkerPrompt } from "../dist/service-state.js";
 import { FileSessionStore } from "../dist/session-store.js";
 import { SerialTurnQueue } from "../dist/serial-turn-queue.js";
 
@@ -193,6 +195,146 @@ test("worker turns expose attachment paths and return changed docx files", async
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     }
   ]);
+});
+
+test("attachment-only turns wait for a later instruction before running a bound worker", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-attachment-wait-worker-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  const attachmentDir = path.join(root, "attachments");
+  const attachmentPath = path.join(attachmentDir, "draft.docx");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+  mkdirSync(attachmentDir, { recursive: true });
+  writeFileSync(attachmentPath, "original docx");
+
+  const calls = [];
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+        assert.match(request.prompt, new RegExp(escapeRegExp(attachmentPath)));
+        return {
+          sessionId: request.sessionId ?? "worker-session-attachment-wait",
+          responseText: "Updated the attachment.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const attachmentTurn = {
+    ...buildTurn(""),
+    attachments: [
+      {
+        id: "file-1",
+        kind: "file",
+        name: "draft.docx",
+        localPath: attachmentPath
+      }
+    ]
+  };
+  await service.bindConversation(attachmentTurn, "repo");
+
+  const waitingPublisher = createPublisher();
+  await service.handleTurn(attachmentTurn, waitingPublisher);
+
+  assert.equal(calls.length, 0);
+  assert.deepEqual(waitingPublisher.completed, [
+    "Saved the attachment from this message. Send another message telling Codex what to do, and the next turn will include it."
+  ]);
+
+  const status = await service.getConversationStatus(buildTurn("status"));
+  assert.equal(status.binding?.attachments?.length, 1);
+
+  const followUpPublisher = createPublisher();
+  await service.handleTurn(buildTurn("update the attachment"), followUpPublisher);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].repositoryPath, repoDir);
+  assert.deepEqual(followUpPublisher.completed, ["Updated the attachment."]);
+});
+
+test("attachment-only turns wait for a later instruction before running the handler", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-attachment-wait-handler-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  const attachmentDir = path.join(root, "attachments");
+  const attachmentPath = path.join(attachmentDir, "notes.docx");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+  mkdirSync(attachmentDir, { recursive: true });
+  writeFileSync(attachmentPath, "draft docx");
+
+  const calls = [];
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+        assert.equal(request.repositoryPath, handlerDir);
+        assert.match(request.prompt, new RegExp(escapeRegExp(attachmentPath)));
+        return {
+          sessionId: request.sessionId ?? "handler-session-attachment-wait",
+          responseText: "Handler saw the attachment.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const attachmentTurn = {
+    ...buildTurn(""),
+    attachments: [
+      {
+        id: "file-1",
+        kind: "file",
+        name: "notes.docx",
+        localPath: attachmentPath
+      }
+    ]
+  };
+
+  const waitingPublisher = createPublisher();
+  await service.handleTurn(attachmentTurn, waitingPublisher);
+
+  assert.equal(calls.length, 0);
+  assert.deepEqual(waitingPublisher.completed, [
+    "Saved the attachment from this message. Send another message telling Codex what to do, and the next turn will include it."
+  ]);
+
+  const followUpPublisher = createPublisher();
+  await service.handleTurn(buildTurn("please review this file"), followUpPublisher);
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(followUpPublisher.completed, ["Handler saw the attachment."]);
 });
 
 test("worker wake actions schedule a background wake-up turn and strip the action tag from visible replies", async (t) => {
@@ -799,6 +941,56 @@ test("handler action tags can bind and delegate in the same reply", async (t) =>
   assert.deepEqual(publisher.completed, ["Worker summary output."]);
   assert.equal(calls[0].repositoryPath, handlerDir);
   assert.equal(calls[1].repositoryPath, repoDir);
+});
+
+test("explicit bind commands can bind a repo and immediately run the trailing prompt", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-explicit-bind-delegate-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const calls = [];
+  const service = new CodexBridgeService(
+    buildConfig(root, handlerDir, [
+      {
+        id: "repo",
+        path: repoDir,
+        sandboxMode: "workspace-write"
+      }
+    ]),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        calls.push(request);
+        return {
+          sessionId: request.sessionId ?? "worker-session-bind-command",
+          responseText: "Worker summary output.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+  const router = new InteractionRouter(service);
+
+  const publisher = createPublisher();
+  await router.handleTurn(buildTurn("/codex bind repo inspect the repo now"), publisher);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].repositoryPath, repoDir);
+  assert.match(calls[0].prompt, /inspect the repo now/);
+  assert.deepEqual(publisher.completed, ["Worker summary output."]);
+  assert.deepEqual(publisher.failed, []);
+
+  const status = await service.getConversationStatus(buildTurn("/codex status"));
+  assert.equal(status.binding?.activeRepository?.repositoryId, "repo");
+  assert.equal(status.binding?.activeRepository?.workerSessionId, "worker-session-bind-command");
 });
 
 test("unbound handler turns replace legacy sessions and honor the configured sandbox", async (t) => {
@@ -1594,6 +1786,80 @@ test("parseBridgeCommand maps clear commands to a fresh-context reset", () => {
   assert.deepEqual(parseBridgeCommand("/codex stop"), {
     kind: "interrupt"
   });
+});
+
+test("parseBridgeCommand keeps the trailing prompt for bind commands", () => {
+  assert.deepEqual(parseBridgeCommand("/codex bind repo inspect the repo now"), {
+    kind: "bind",
+    repositoryId: "repo",
+    text: "inspect the repo now"
+  });
+});
+
+test("handler prompt forces bind-plus-delegate for repo-plus-task requests, including Chinese phrasing", () => {
+  const prompt = buildHandlerUserPrompt({
+    turn: buildTurn("总结一下 arbitero 的现状"),
+    state: {
+      handlerSessionId: undefined,
+      activeRepository: undefined
+    },
+    availableRepositories: [
+      {
+        id: "arbitero",
+        path: "/tmp/arbitero",
+        sandboxMode: "workspace-write"
+      }
+    ],
+    requireExplicitRepositorySelection: true,
+    conversationLanguage: "zh"
+  });
+
+  assert.match(prompt, /do not stop at BIND/i);
+  assert.match(prompt, /Concrete repo work includes summaries, status checks/i);
+  assert.match(prompt, /Summarize arbitero's current status\./);
+  assert.match(prompt, /总结一下 arbitero 的现状。/);
+  assert.match(prompt, /\[\[ACTION:BIND\(arbitero\)\]\]/);
+  assert.match(prompt, /\[\[ACTION:DELEGATE\(总结 arbitero 当前的现状。\)\]\]/);
+});
+
+test("handler prompt tells Codex to avoid tables and keep replies IM-friendly", () => {
+  const prompt = buildHandlerUserPrompt({
+    turn: {
+      ...buildTurn("summarize the repo"),
+      platform: "feishu"
+    },
+    state: {
+      handlerSessionId: undefined,
+      activeRepository: undefined
+    },
+    availableRepositories: [],
+    requireExplicitRepositorySelection: true,
+    conversationLanguage: "en"
+  });
+
+  assert.match(prompt, /Do not use Markdown tables in user-visible replies\./);
+  assert.match(prompt, /Use short paragraphs, simple lists, and fenced code blocks instead\./);
+  assert.match(prompt, /Feishu delivery is especially plain-text oriented/i);
+});
+
+test("worker prompt tells Codex to avoid tables and keep replies IM-friendly", () => {
+  const prompt = buildWorkerPrompt(
+    {
+      repositoryId: "arbitero",
+      repositoryPath: "/tmp/arbitero",
+      sandboxMode: "workspace-write",
+      updatedAt: "2026-04-07T00:00:00.000Z"
+    },
+    {
+      ...buildTurn("summarize the repo"),
+      platform: "feishu"
+    },
+    "Summarize the repo status."
+  );
+
+  assert.match(prompt, /Do not use Markdown tables in user-visible replies\./);
+  assert.match(prompt, /Use short paragraphs, simple lists, and fenced code blocks instead\./);
+  assert.match(prompt, /Feishu delivery is especially plain-text oriented/i);
 });
 
 function buildConfig(root, handlerDir, repositoryTargets, overrides = {}) {
