@@ -39,6 +39,7 @@ import {
   type DiscordInteractionDeliveryState,
   type DiscordSendableChannel
 } from "./discord-delivery.js";
+import { buildDiscordThreadName } from "./discord-thread-name.js";
 import type { Attachment, ProcessingStatus } from "./domain.js";
 import { isProcessGuardActive, PROCESS_RESTART_EXIT_CODE } from "./process-guard.js";
 import {
@@ -738,7 +739,7 @@ class DiscordBotWorker {
     });
 
     return starterMessage.startThread({
-      name: buildThreadName(this.discordConfig.threadNamePrefix, options.promptSeed),
+      name: buildDiscordThreadName(this.discordConfig.threadNamePrefix, options.promptSeed),
       autoArchiveDuration: this.discordConfig.threadAutoArchiveDuration,
       reason: `Codex conversation created for ${options.userLabel}`
     });
@@ -809,17 +810,6 @@ class InteractionAck {
   async complete(content: string): Promise<void> {
     await this.send(content);
   }
-}
-
-function buildThreadName(prefix: string, seed: string): string {
-  const normalizedSeed = seed
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-
-  const suffix = normalizedSeed || "session";
-  return `${prefix}-${suffix}`.slice(0, 100);
 }
 
 function isThreadStarterChannel(channel: unknown): channel is TextChannel | NewsChannel {
