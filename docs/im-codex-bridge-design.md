@@ -36,6 +36,7 @@ The current bridge runtime also supports a bridge-level yolo override:
 - `bridge.yolo_mode = true` or unset: force all handler and worker turns to `danger-full-access` with `approvalPolicy: never`
 - `bridge.yolo_mode = false`: honor the configured handler and repository sandbox/approval settings
 - `bridge.progress_updates = "minimal"` or unset: keep intermediate progress delivery sparse and rely on heartbeats/working indicators when available
+- `bridge.progress_updates = "latest"`: keep one editable tool-summary message plus one editable latest-status message; the final reply overwrites only the latest-status message
 - `bridge.progress_updates = "verbose"`: surface more per-step progress messages from Codex
 - `bridge.progress_updates = "off"`: suppress progress and heartbeat updates until the final reply
 

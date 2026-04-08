@@ -739,6 +739,7 @@ export class FeishuBot {
       text: input.text,
       attachments: input.attachments ?? [],
       receivedAt: input.receivedAt ?? new Date().toISOString(),
+      progressMode: this.bridgeRuntime.config.progressUpdates,
       acknowledge: async () => undefined,
       postMessage: async (message) => this.postConversationMessage(input.target, message),
       updateMessage: async (messageId, message) => {

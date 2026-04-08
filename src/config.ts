@@ -19,7 +19,7 @@ import {
 } from "./config-file.js";
 import type { ApprovalPolicy, SandboxMode } from "./domain.js";
 
-export type ProgressUpdateMode = "off" | "minimal" | "verbose";
+export type ProgressUpdateMode = "off" | "minimal" | "latest" | "verbose";
 
 export interface RepositoryTarget {
   id: string;
@@ -352,11 +352,11 @@ function parseApprovalPolicy(value: unknown): ApprovalPolicy {
 }
 
 function parseProgressUpdateMode(value: unknown): ProgressUpdateMode {
-  if (value === "off" || value === "minimal" || value === "verbose") {
+  if (value === "off" || value === "minimal" || value === "latest" || value === "verbose") {
     return value;
   }
 
-  throw new Error("progress_updates must be one of off, minimal, or verbose.");
+  throw new Error("progress_updates must be one of off, minimal, latest, or verbose.");
 }
 
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {

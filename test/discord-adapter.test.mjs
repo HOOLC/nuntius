@@ -167,3 +167,78 @@ test("Discord adapter rewrites markdown links into readable text", async () => {
     ].join("\n")
   ]);
 });
+
+test("Discord latest progress mode keeps tool counts and latest status in separate editable messages", async () => {
+  const messages = [];
+  const progressMessages = [];
+  const progressEdits = [];
+
+  const adapter = new DiscordAdapter({
+    async handleTurn(turn, publisher) {
+      await publisher.publishProgress(turn, "Reading files.");
+      await publisher.publishProgress(turn, "Editing README.md\n\n⚙️ 1 cmd");
+      await publisher.publishCompleted(turn, {
+        text: "Finished.\n\n⚙️ 1 cmd",
+        truncated: false
+      });
+    }
+  });
+
+  await adapter.handleTurn({
+    workspaceId: "discord:workspace",
+    channelId: "thread-1",
+    scope: "thread",
+    userId: "user-1",
+    text: "inspect the repo",
+    progressMode: "latest",
+    deferReply: async () => undefined,
+    followUp: async (message) => {
+      messages.push(message);
+    },
+    postProgressMessage: async (message) => {
+      const messageId = `progress-${progressMessages.length + 1}`;
+      progressMessages.push({
+        messageId,
+        message
+      });
+      return {
+        async edit(content) {
+          progressEdits.push({
+            messageId,
+            message: content
+          });
+        }
+      };
+    }
+  });
+
+  assert.deepEqual(messages, []);
+  assert.deepEqual(progressMessages, [
+    {
+      messageId: "progress-1",
+      message: "🧰 0 tool updates"
+    },
+    {
+      messageId: "progress-2",
+      message: "Reading files."
+    }
+  ]);
+  assert.deepEqual(progressEdits, [
+    {
+      messageId: "progress-1",
+      message: "⚙️ 1 cmd"
+    },
+    {
+      messageId: "progress-2",
+      message: "Editing README.md"
+    },
+    {
+      messageId: "progress-1",
+      message: "⚙️ 1 cmd"
+    },
+    {
+      messageId: "progress-2",
+      message: "Finished."
+    }
+  ]);
+});

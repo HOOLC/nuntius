@@ -42,6 +42,8 @@ export class CodexRunProgressReporter {
   private sawTurnCompleted = false;
   private lastActivityAt = Date.now();
   private workingIndicatorVisible = false;
+  private latestAgentMessage?: string;
+  private latestToolSummary?: string;
   private completedAgentCount = 0;
   private completedSearchCount = 0;
   private completedGlobCount = 0;
@@ -93,12 +95,13 @@ export class CodexRunProgressReporter {
 
     if (progress.kind === "agent_message") {
       this.flushBufferedAgent();
+      this.latestAgentMessage = progress.message;
       this.bufferedAgentMessage = progress.message;
       return;
     }
 
     this.flushBufferedAgent();
-    this.enqueue(progress.message);
+    this.enqueue(this.buildVisibleProgressMessage(progress));
   }
 
   private describeProgressEvent(event: CodexEvent): ProgressMessage | undefined {
@@ -141,17 +144,17 @@ export class CodexRunProgressReporter {
     this.completedCommandCount += usage.commandCount;
     this.completedFileEditCount += usage.fileEditCount;
 
-    return toProgressMessage(
-      formatToolUsageSummary(this.context.language, {
+    const summary = formatToolUsageSummary(this.context.language, {
         agentCount: this.completedAgentCount,
         searchCount: this.completedSearchCount,
         globCount: this.completedGlobCount,
         fileReadCount: this.completedFileReadCount,
         commandCount: this.completedCommandCount,
         fileEditCount: this.completedFileEditCount
-      }),
-      "status"
-    );
+      });
+    this.latestToolSummary = summary;
+
+    return toProgressMessage(summary, "status");
   }
 
   async stop(): Promise<void> {
@@ -167,6 +170,14 @@ export class CodexRunProgressReporter {
     }
 
     await this.pending;
+  }
+
+  getLatestToolSummary(): string | undefined {
+    if (this.options.mode !== "latest") {
+      return undefined;
+    }
+
+    return this.latestToolSummary;
   }
 
   private publishHeartbeat(): void {
@@ -233,7 +244,10 @@ export class CodexRunProgressReporter {
       return;
     }
 
-    const message = this.bufferedAgentMessage;
+    const message = this.buildVisibleProgressMessage({
+      kind: "agent_message",
+      message: this.bufferedAgentMessage
+    });
     this.bufferedAgentMessage = undefined;
 
     if (!this.shouldPublishProgress("agent_message")) {
@@ -253,6 +267,7 @@ export class CodexRunProgressReporter {
         return false;
       case "minimal":
         return kind === "status";
+      case "latest":
       case "verbose":
         return true;
     }
@@ -282,6 +297,25 @@ export class CodexRunProgressReporter {
       }
     });
   }
+
+  private buildVisibleProgressMessage(progress: ProgressMessage): string {
+    if (this.options.mode !== "latest") {
+      return progress.message;
+    }
+
+    if (progress.kind === "status") {
+      return combineLatestProgressMessage(this.latestAgentMessage, progress.message);
+    }
+
+    return combineLatestProgressMessage(progress.message, this.latestToolSummary);
+  }
+}
+
+function combineLatestProgressMessage(
+  primaryMessage: string | undefined,
+  toolSummary: string | undefined
+): string {
+  return [primaryMessage?.trim(), toolSummary?.trim()].filter(Boolean).join("\n\n");
 }
 
 function buildHeartbeatMessage(context: CodexProgressContext): string {

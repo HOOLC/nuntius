@@ -8,7 +8,9 @@ yolo_mode = true
 default_repository_id = "nuntius"
 require_explicit_repository_selection = true
 # Keep intermediate progress replies sparse by default.
-# Use "verbose" to surface more step-by-step progress, or "off" to suppress them.
+# Use "latest" to keep two rolling messages: one for cumulative tool counts and one for the latest
+# Codex status update; the final reply overwrites only the second message.
+# "verbose" to surface more step-by-step progress, or "off" to suppress them.
 progress_updates = "minimal"
 handler_workspace_path = "."
 # Only used when yolo_mode = false.

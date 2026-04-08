@@ -1,3 +1,4 @@
+import type { ProgressUpdateMode } from "../config.js";
 import { localize } from "../conversation-language.js";
 import type {
   Attachment,
@@ -13,11 +14,18 @@ import {
   buildInboundTurn,
   createProcessingStatusSynchronizer
 } from "./shared.js";
-import type { DiscordEditableMessage } from "../discord-delivery.js";
+import {
+  type DiscordEditableMessage,
+  splitDiscordMessage
+} from "../discord-delivery.js";
 import {
   formatDiscordMessageText,
   trimCodeFencePayload
 } from "../text-formatting.js";
+import {
+  buildInitialToolSummary,
+  splitLatestProgressMessage
+} from "../latest-progress.js";
 
 export interface DiscordEnvelope {
   workspaceId: string;
@@ -30,6 +38,7 @@ export interface DiscordEnvelope {
   attachments?: Attachment[];
   repositoryId?: string;
   receivedAt?: string;
+  progressMode?: ProgressUpdateMode;
   deferReply: () => Promise<void>;
   startTyping?: () => Promise<{ stop(): Promise<void> }>;
   followUp: (message: string) => Promise<void>;
@@ -53,6 +62,7 @@ class DiscordPublisher implements TurnPublisher {
   private typingLease?: {
     stop(): Promise<void>;
   };
+  private toolSummaryMessage?: DiscordEditableMessage;
   private progressMessage?: DiscordEditableMessage;
 
   constructor(private readonly envelope: DiscordEnvelope) {
@@ -61,18 +71,23 @@ class DiscordPublisher implements TurnPublisher {
 
   async publishQueued(_: InboundTurn, language: ConversationLanguage): Promise<void> {
     await this.syncProcessingStatus("queued");
-    await this.envelope.followUp(
-      renderDiscordStatus(
-        localize(language, {
-          en: "Queued",
-          zh: "已排队"
-        }),
-        localize(language, {
-          en: "Waiting for the active Codex turn in this conversation.",
-          zh: "当前会话已有进行中的 Codex turn，正在等待。"
-        })
-      )
+    const reply = renderDiscordStatus(
+      localize(language, {
+        en: "Queued",
+        zh: "已排队"
+      }),
+      localize(language, {
+        en: "Waiting for the active Codex turn in this conversation.",
+        zh: "当前会话已有进行中的 Codex turn，正在等待。"
+      })
     );
+
+    if (this.shouldReplaceLatestMessage()) {
+      await this.publishLatestModeMessages(reply, language);
+      return;
+    }
+
+    await this.envelope.followUp(reply);
   }
 
   async publishStarted(
@@ -87,9 +102,14 @@ class DiscordPublisher implements TurnPublisher {
   async publishProgress(
     _: InboundTurn,
     message: string,
-    _language: ConversationLanguage
+    language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
+    if (this.shouldReplaceLatestMessage()) {
+      await this.publishLatestModeMessages(renderDiscordReply(message), language);
+      return;
+    }
+
     await this.setProgressMessage(renderDiscordReply(message));
   }
 
@@ -99,14 +119,20 @@ class DiscordPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("finished");
-    this.progressMessage = undefined;
     const suffix = message.truncated
       ? localize(language, {
           en: "\n\n_Reply truncated for Discord delivery._",
           zh: "\n\n_回复因 Discord 投递限制已被截断。_"
         })
       : "";
-    await this.envelope.followUp(renderDiscordReply(`${message.text}${suffix}`));
+    const reply = renderDiscordReply(`${message.text}${suffix}`);
+    if (this.shouldReplaceLatestMessage()) {
+      await this.publishLatestModeMessages(reply, language);
+      return;
+    }
+
+    this.progressMessage = undefined;
+    await this.envelope.followUp(reply);
   }
 
   async publishInterrupted(
@@ -122,6 +148,11 @@ class DiscordPublisher implements TurnPublisher {
       }),
       message
     );
+    if (this.shouldReplaceLatestMessage()) {
+      await this.publishLatestModeMessages(reply, language);
+      return;
+    }
+
     if (await this.replaceProgressMessage(reply)) {
       return;
     }
@@ -136,6 +167,11 @@ class DiscordPublisher implements TurnPublisher {
   ): Promise<void> {
     await this.syncProcessingStatus("failed");
     const reply = renderDiscordError(errorMessage, language);
+    if (this.shouldReplaceLatestMessage()) {
+      await this.publishLatestModeMessages(reply, language);
+      return;
+    }
+
     if (await this.replaceProgressMessage(reply)) {
       return;
     }
@@ -178,17 +214,47 @@ class DiscordPublisher implements TurnPublisher {
   }
 
   private async setProgressMessage(message: string): Promise<void> {
-    if (this.progressMessage) {
-      await this.progressMessage.edit(message);
-      return;
+    this.progressMessage = await this.setTrackedMessage(this.progressMessage, message);
+  }
+
+  private async setToolSummaryMessage(message: string): Promise<void> {
+    this.toolSummaryMessage = await this.setTrackedMessage(this.toolSummaryMessage, message);
+  }
+
+  private async setTrackedMessage(
+    currentMessage: DiscordEditableMessage | undefined,
+    message: string
+  ): Promise<DiscordEditableMessage | undefined> {
+    const chunks = splitDiscordMessage(message);
+    if (chunks.length === 0) {
+      return currentMessage;
+    }
+
+    if (currentMessage) {
+      await currentMessage.edit(chunks[0]);
+      if (chunks.length > 1) {
+        for (const chunk of chunks.slice(1)) {
+          await this.envelope.followUp(chunk);
+        }
+        return undefined;
+      }
+
+      return currentMessage;
     }
 
     if (this.envelope.postProgressMessage) {
-      this.progressMessage = await this.envelope.postProgressMessage(message);
-      return;
+      const nextMessage = await this.envelope.postProgressMessage(chunks[0]);
+      for (const chunk of chunks.slice(1)) {
+        await this.envelope.followUp(chunk);
+      }
+      return chunks.length === 1 ? nextMessage : undefined;
     }
 
-    await this.envelope.followUp(message);
+    for (const chunk of chunks) {
+      await this.envelope.followUp(chunk);
+    }
+
+    return undefined;
   }
 
   private async replaceProgressMessage(message: string): Promise<boolean> {
@@ -196,9 +262,30 @@ class DiscordPublisher implements TurnPublisher {
       return false;
     }
 
-    await this.progressMessage.edit(message);
+    await this.setProgressMessage(message);
     this.progressMessage = undefined;
     return true;
+  }
+
+  private shouldReplaceLatestMessage(): boolean {
+    return this.envelope.progressMode === "latest";
+  }
+
+  private async publishLatestModeMessages(
+    message: string,
+    language: ConversationLanguage
+  ): Promise<void> {
+    const parts = splitLatestProgressMessage(message);
+
+    if (parts.toolSummary) {
+      await this.setToolSummaryMessage(parts.toolSummary);
+    } else if (parts.latestMessage && !this.toolSummaryMessage) {
+      await this.setToolSummaryMessage(buildInitialToolSummary(language));
+    }
+
+    if (parts.latestMessage) {
+      await this.setProgressMessage(parts.latestMessage);
+    }
   }
 }
 

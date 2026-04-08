@@ -701,6 +701,7 @@ export class SlackBot {
       text: input.text,
       attachments: input.attachments ?? [],
       receivedAt: input.receivedAt ?? new Date().toISOString(),
+      progressMode: this.bridgeRuntime.config.progressUpdates,
       acknowledge: async () => undefined,
       postMessage: async (message) => {
         if (input.messageMode === "ephemeral") {

@@ -97,6 +97,7 @@ export interface SessionReconciliationResult {
 interface HandlerRunResult {
   binding: ConversationBinding;
   decision: HandlerDecision;
+  latestToolSummary?: string;
 }
 
 type ActiveTurnActor = "handler" | "worker";
@@ -204,7 +205,11 @@ export class CodexBridgeService {
           await this.sessionStore.upsert(binding);
 
           if (outcome.finalMessage) {
-            finalMessage = outcome.finalMessage;
+            finalMessage = this.decorateLatestFinalMessage(
+              outcome.finalMessage,
+              handlerRun.latestToolSummary,
+              language
+            );
             break;
           }
         }
@@ -514,7 +519,8 @@ export class CodexBridgeService {
           handlerConfig,
           updatedAt: new Date().toISOString()
         },
-        decision: parseHandlerDecision(result.responseText)
+        decision: parseHandlerDecision(result.responseText),
+        latestToolSummary: progress.getLatestToolSummary()
       };
     });
   }
@@ -704,7 +710,7 @@ export class CodexBridgeService {
         return {
           binding: workerResult.binding,
           finalMessage: clipMessage(
-            visibleReply,
+            this.appendLatestToolSummary(visibleReply, workerResult.latestToolSummary),
             this.config.maxResponseChars,
             workerResult.returnedFiles,
             language
@@ -893,10 +899,13 @@ export class CodexBridgeService {
           return {
             binding: touchBinding(binding),
             finalMessage: clipMessage(
-              this.buildScheduledTaskCreatedMessage(
-                taskRecord,
-                this.summarizeScheduledTaskResponse(result.responseText),
-                language
+              this.appendLatestToolSummary(
+                this.buildScheduledTaskCreatedMessage(
+                  taskRecord,
+                  this.summarizeScheduledTaskResponse(result.responseText),
+                  language
+                ),
+                progress.getLatestToolSummary()
               ),
               this.config.maxResponseChars,
               undefined,
@@ -1050,7 +1059,12 @@ export class CodexBridgeService {
     workerPrompt: string,
     publisher: TurnPublisher,
     signal: AbortSignal
-  ): Promise<{ binding: ConversationBinding; output: string; returnedFiles: OutboundMessage["attachments"] }> {
+  ): Promise<{
+    binding: ConversationBinding;
+    output: string;
+    returnedFiles: OutboundMessage["attachments"];
+    latestToolSummary?: string;
+  }> {
     if (!binding.activeRepository) {
       throw new Error("A worker turn was requested without an active repository binding.");
     }
@@ -1118,8 +1132,39 @@ export class CodexBridgeService {
     return {
       binding: this.buildWorkerResultBinding(binding, worker, result.sessionId, workerDecision),
       output: workerDecision.message ?? "",
-      returnedFiles: diffTrackedDocumentFiles(documentFilesBefore, documentFilesAfter)
+      returnedFiles: diffTrackedDocumentFiles(documentFilesBefore, documentFilesAfter),
+      latestToolSummary: progress.getLatestToolSummary()
     };
+  }
+
+  private decorateLatestFinalMessage(
+    message: OutboundMessage,
+    latestToolSummary: string | undefined,
+    language: ConversationLanguage
+  ): OutboundMessage {
+    return clipMessage(
+      this.appendLatestToolSummary(message.text, latestToolSummary),
+      this.config.maxResponseChars,
+      message.attachments,
+      language
+    );
+  }
+
+  private appendLatestToolSummary(
+    message: string,
+    latestToolSummary: string | undefined
+  ): string {
+    if (this.config.progressUpdates !== "latest" || !latestToolSummary) {
+      return message;
+    }
+
+    const normalizedMessage = message.trim();
+    const normalizedSummary = latestToolSummary.trim();
+    if (!normalizedMessage) {
+      return normalizedSummary;
+    }
+
+    return `${normalizedMessage}\n\n${normalizedSummary}`;
   }
 
   private buildRepositoryTaskPrompt(

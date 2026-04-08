@@ -135,3 +135,82 @@ test("Feishu rewrites markdown into plain-text-friendly output", async () => {
     ].join("\n")
   );
 });
+
+test("Feishu latest progress mode keeps tool counts and latest status in separate messages", async () => {
+  const postedMessages = [];
+  const updatedMessages = [];
+
+  const adapter = new FeishuAdapter({
+    async handleTurn(turn, publisher) {
+      await publisher.publishProgress(turn, "Reading files.");
+      await publisher.publishProgress(turn, "Editing README.md\n\n⚙️ 1 cmd");
+      await publisher.publishCompleted(turn, {
+        text: "Finished.\n\n⚙️ 1 cmd",
+        truncated: false
+      });
+    }
+  });
+
+  await adapter.handleTurn({
+    workspaceId: "feishu:workspace",
+    channelId: "chat-1",
+    scope: "thread",
+    userId: "ou-user-1",
+    text: "inspect the repo",
+    progressMode: "latest",
+    acknowledge: async () => undefined,
+    postMessage: async (message) => {
+      postedMessages.push(message);
+      return {
+        messageId: `om-working-${postedMessages.length}`
+      };
+    },
+    updateMessage: async (messageId, message) => {
+      updatedMessages.push({
+        messageId,
+        message
+      });
+    }
+  });
+
+  assert.deepEqual(
+    postedMessages.map((entry, index) => ({
+      messageId: `om-working-${index + 1}`,
+      text: JSON.parse(entry.content).text
+    })),
+    [
+      {
+        messageId: "om-working-1",
+        text: "🧰 0 tool updates"
+      },
+      {
+        messageId: "om-working-2",
+        text: "Reading files."
+      }
+    ]
+  );
+  assert.deepEqual(
+    updatedMessages.map((entry) => ({
+      messageId: entry.messageId,
+      text: JSON.parse(entry.message.content).text
+    })),
+    [
+      {
+        messageId: "om-working-1",
+        text: "⚙️ 1 cmd"
+      },
+      {
+        messageId: "om-working-2",
+        text: "Editing README.md"
+      },
+      {
+        messageId: "om-working-1",
+        text: "⚙️ 1 cmd"
+      },
+      {
+        messageId: "om-working-2",
+        text: "Finished."
+      }
+    ]
+  );
+});

@@ -54,7 +54,7 @@ Set `bridge.yolo_mode = false` if you want `bridge.handler_sandbox_mode` plus ea
 
 Repository targets also default to `allow_codex_network_access = true`, so worker turns request web access with `codex --search` unless you disable that per repository.
 
-`bridge.progress_updates` defaults to `minimal`, which keeps intermediate replies sparse and prefers typing/heartbeat indicators when available. Set it to `verbose` to surface more per-step progress messages, or `off` to wait for the final reply.
+`bridge.progress_updates` defaults to `minimal`, which keeps intermediate replies sparse and prefers typing/heartbeat indicators when available. Set it to `latest` to keep one editable tool-count message plus one editable latest-status message, with the final reply overwriting only the second message; use `verbose` to surface more per-step progress messages, or `off` to wait for the final reply.
 
 ## Discord Developer Portal
 

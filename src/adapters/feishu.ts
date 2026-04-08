@@ -1,3 +1,4 @@
+import type { ProgressUpdateMode } from "../config.js";
 import { localize } from "../conversation-language.js";
 import type {
   Attachment,
@@ -13,6 +14,10 @@ import {
   buildInboundTurn,
   createProcessingStatusSynchronizer
 } from "./shared.js";
+import {
+  buildInitialToolSummary,
+  splitLatestProgressMessage
+} from "../latest-progress.js";
 import {
   formatFeishuMessageText,
   trimCodeFencePayload
@@ -34,6 +39,7 @@ export interface FeishuEnvelope {
   attachments?: Attachment[];
   repositoryId?: string;
   receivedAt?: string;
+  progressMode?: ProgressUpdateMode;
   acknowledge: () => Promise<void>;
   postMessage: (message: FeishuChatMessage) => Promise<{ messageId?: string }>;
   updateMessage?: (messageId: string, message: FeishuChatMessage) => Promise<void>;
@@ -58,6 +64,7 @@ export class FeishuAdapter {
 
 class FeishuPublisher implements TurnPublisher {
   private readonly syncProcessingStatus: (status: ProcessingStatus) => Promise<void>;
+  private toolSummaryMessageId?: string;
   private progressMessageId?: string;
 
   constructor(private readonly envelope: FeishuEnvelope) {
@@ -66,18 +73,23 @@ class FeishuPublisher implements TurnPublisher {
 
   async publishQueued(_: InboundTurn, language: ConversationLanguage): Promise<void> {
     await this.syncProcessingStatus("queued");
-    await this.envelope.postMessage(
-      renderFeishuStatus(
-        localize(language, {
-          en: "Queued",
-          zh: "已排队"
-        }),
-        localize(language, {
-          en: "Queued behind the active Codex turn for this conversation.",
-          zh: "当前会话已有进行中的 Codex turn，本条消息已进入队列。"
-        })
-      )
+    const replyText = formatFeishuStatusText(
+      localize(language, {
+        en: "Queued",
+        zh: "已排队"
+      }),
+      localize(language, {
+        en: "Queued behind the active Codex turn for this conversation.",
+        zh: "当前会话已有进行中的 Codex turn，本条消息已进入队列。"
+      })
     );
+
+    if (this.shouldReplaceLatestMessage()) {
+      await this.setLatestModeMessages(replyText, language);
+      return;
+    }
+
+    await this.envelope.postMessage(renderFeishuTextMessage(replyText));
   }
 
   async publishStarted(
@@ -92,9 +104,14 @@ class FeishuPublisher implements TurnPublisher {
   async publishProgress(
     _: InboundTurn,
     message: string,
-    _language: ConversationLanguage
+    language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
+    if (this.shouldReplaceLatestMessage()) {
+      await this.setLatestModeMessages(message, language);
+      return;
+    }
+
     await this.setProgressMessage(renderFeishuTextMessage(message));
   }
 
@@ -104,8 +121,12 @@ class FeishuPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("finished");
-    const replyMessage = renderFeishuReply(message.text, message.truncated, language);
-    await this.envelope.postMessage(replyMessage);
+    const replyText = formatFeishuReplyText(message.text, message.truncated, language);
+    if (this.shouldReplaceLatestMessage()) {
+      await this.setLatestModeMessages(replyText, language);
+    } else {
+      await this.envelope.postMessage(renderFeishuTextMessage(replyText));
+    }
 
     if (!this.envelope.uploadFile) {
       return;
@@ -142,15 +163,20 @@ class FeishuPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("interrupted");
-    await this.envelope.postMessage(
-      renderFeishuStatus(
-        localize(language, {
-          en: "Interrupted",
-          zh: "已中断"
-        }),
-        message
-      )
+    const replyText = formatFeishuStatusText(
+      localize(language, {
+        en: "Interrupted",
+        zh: "已中断"
+      }),
+      message
     );
+
+    if (this.shouldReplaceLatestMessage()) {
+      await this.setLatestModeMessages(replyText, language);
+      return;
+    }
+
+    await this.envelope.postMessage(renderFeishuTextMessage(replyText));
   }
 
   async publishFailed(
@@ -159,7 +185,13 @@ class FeishuPublisher implements TurnPublisher {
     language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("failed");
-    await this.envelope.postMessage(renderFeishuError(errorMessage, language));
+    const replyText = formatFeishuErrorText(errorMessage, language);
+    if (this.shouldReplaceLatestMessage()) {
+      await this.setLatestModeMessages(replyText, language);
+      return;
+    }
+
+    await this.envelope.postMessage(renderFeishuTextMessage(replyText));
   }
 
   async refreshWorkingIndicator(
@@ -176,16 +208,52 @@ class FeishuPublisher implements TurnPublisher {
     return undefined;
   }
 
+  private async setLatestModeMessages(
+    message: string,
+    language: ConversationLanguage
+  ): Promise<void> {
+    const parts = splitLatestProgressMessage(message);
+
+    if (parts.toolSummary) {
+      await this.setToolSummaryMessage(renderFeishuTextMessage(parts.toolSummary));
+    } else if (parts.latestMessage && !this.toolSummaryMessageId) {
+      await this.setToolSummaryMessage(
+        renderFeishuTextMessage(buildInitialToolSummary(language))
+      );
+    }
+
+    if (parts.latestMessage) {
+      await this.setProgressMessage(renderFeishuTextMessage(parts.latestMessage));
+    }
+  }
+
+  private async setToolSummaryMessage(message: FeishuChatMessage): Promise<void> {
+    this.toolSummaryMessageId = await this.setTrackedMessage(this.toolSummaryMessageId, message);
+  }
+
   private async setProgressMessage(message: FeishuChatMessage): Promise<void> {
-    if (this.progressMessageId && this.envelope.updateMessage) {
-      await this.envelope.updateMessage(this.progressMessageId, message);
-      return;
+    this.progressMessageId = await this.setTrackedMessage(this.progressMessageId, message);
+  }
+
+  private async setTrackedMessage(
+    currentMessageId: string | undefined,
+    message: FeishuChatMessage
+  ): Promise<string | undefined> {
+    if (currentMessageId && this.envelope.updateMessage) {
+      await this.envelope.updateMessage(currentMessageId, message);
+      return currentMessageId;
     }
 
     const result = await this.envelope.postMessage(message);
     if (result.messageId && this.envelope.updateMessage) {
-      this.progressMessageId = result.messageId;
+      return result.messageId;
     }
+
+    return undefined;
+  }
+
+  private shouldReplaceLatestMessage(): boolean {
+    return this.envelope.progressMode === "latest";
   }
 }
 
@@ -212,12 +280,7 @@ function renderFeishuFileMessage(fileKey: string): FeishuChatMessage {
 }
 
 function renderFeishuStatus(title: string, body: string): FeishuChatMessage {
-  const normalizedBody = body.trim();
-  const text = normalizedBody
-    ? [`[${title}]`, normalizedBody].join("\n")
-    : `[${title}]`;
-
-  return renderFeishuTextMessage(text);
+  return renderFeishuTextMessage(formatFeishuStatusText(title, body));
 }
 
 function renderFeishuReply(
@@ -225,6 +288,26 @@ function renderFeishuReply(
   truncated: boolean | undefined,
   language: ConversationLanguage
 ): FeishuChatMessage {
+  return renderFeishuTextMessage(formatFeishuReplyText(body, truncated, language));
+}
+
+function renderFeishuError(
+  errorMessage: string,
+  language: ConversationLanguage
+): FeishuChatMessage {
+  return renderFeishuTextMessage(formatFeishuErrorText(errorMessage, language));
+}
+
+function formatFeishuStatusText(title: string, body: string): string {
+  const normalizedBody = body.trim();
+  return normalizedBody ? [`[${title}]`, normalizedBody].join("\n") : `[${title}]`;
+}
+
+function formatFeishuReplyText(
+  body: string,
+  truncated: boolean | undefined,
+  language: ConversationLanguage
+): string {
   const normalizedBody = body.trim();
   const suffix = truncated
     ? localize(language, {
@@ -232,27 +315,25 @@ function renderFeishuReply(
         zh: "\n\n回复因飞书投递限制已被截断。"
       })
     : "";
-  return renderFeishuTextMessage(`${normalizedBody}${suffix}`.trim());
+  return `${normalizedBody}${suffix}`.trim();
 }
 
-function renderFeishuError(
+function formatFeishuErrorText(
   errorMessage: string,
   language: ConversationLanguage
-): FeishuChatMessage {
-  return renderFeishuTextMessage(
-    [
-      localize(language, {
-        en: "[Failed]",
-        zh: "[失败]"
-      }),
-      localize(language, {
-        en: "Codex could not complete this turn.",
-        zh: "Codex 未能完成这次 turn。"
-      }),
-      "",
-      trimCodeFencePayload(errorMessage)
-    ].join("\n")
-  );
+): string {
+  return [
+    localize(language, {
+      en: "[Failed]",
+      zh: "[失败]"
+    }),
+    localize(language, {
+      en: "Codex could not complete this turn.",
+      zh: "Codex 未能完成这次 turn。"
+    }),
+    "",
+    trimCodeFencePayload(errorMessage)
+  ].join("\n");
 }
 
 function formatAttachmentFailure(error: unknown): string {

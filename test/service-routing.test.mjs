@@ -1671,6 +1671,71 @@ test("default progress mode keeps agent progress updates out of intermediate rep
   assert.deepEqual(publisher.completed, ["Done."]);
 });
 
+test("latest progress mode keeps tool counts in both progress and final replies", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-progress-latest-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const handlerDir = path.join(root, "handler");
+  const repoDir = path.join(root, "repo");
+  mkdirSync(handlerDir, { recursive: true });
+  mkdirSync(repoDir, { recursive: true });
+
+  const service = new CodexBridgeService(
+    buildConfig(
+      root,
+      handlerDir,
+      [
+        {
+          id: "repo",
+          path: repoDir,
+          sandboxMode: "workspace-write"
+        }
+      ],
+      {
+        progressUpdates: "latest"
+      }
+    ),
+    new FileSessionStore(path.join(root, "sessions.json")),
+    new SerialTurnQueue(),
+    {
+      async runTurn(request) {
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: "Editing README.md"
+          }
+        });
+        request.onEvent?.({
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            exit_code: 0
+          }
+        });
+
+        return {
+          sessionId: "worker-session-1",
+          responseText: "Done.",
+          rawEvents: [],
+          stderrLines: []
+        };
+      }
+    }
+  );
+
+  const turn = buildTurn("inspect the repo");
+  await service.bindConversation(turn, "repo");
+
+  const publisher = createPublisher();
+  await service.handleTurn(turn, publisher);
+
+  assert.deepEqual(publisher.progress, ["Editing README.md\n\n⚙️ 1 cmd"]);
+  assert.deepEqual(publisher.completed, ["Done.\n\n⚙️ 1 cmd"]);
+});
+
 test("absolute paths are stripped from progress and final replies", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-sanitize-"));
   t.after(() => {
