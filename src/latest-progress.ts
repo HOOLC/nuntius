@@ -1,6 +1,3 @@
-import { localize } from "./conversation-language.js";
-import type { ConversationLanguage } from "./domain.js";
-
 const TOOL_SUMMARY_PREFIXES = ["🤖 ", "🔍 ", "📖 ", "⚙️ ", "✏️ "];
 
 export interface LatestProgressParts {
@@ -33,13 +30,6 @@ export function splitLatestProgressMessage(message: string): LatestProgressParts
   return {
     latestMessage: normalized
   };
-}
-
-export function buildInitialToolSummary(language: ConversationLanguage): string {
-  return localize(language, {
-    en: "🧰 0 tool updates",
-    zh: "🧰 0 次工具更新"
-  });
 }
 
 function isToolSummaryBlock(message: string): boolean {

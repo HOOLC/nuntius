@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { SlackAdapter } from "../dist/adapters/slack.js";
 
-test("Slack latest progress mode keeps tool counts and latest status in separate messages", async () => {
+test("Slack latest progress mode keeps separate tool-count and status messages without placeholders", async () => {
   const postedMessages = [];
   const updatedMessages = [];
   let acknowledged = 0;
@@ -45,23 +45,19 @@ test("Slack latest progress mode keeps tool counts and latest status in separate
     }
   });
 
-  assert.deepEqual(postedMessages, ["🧰 0 tool updates", "Reading files."]);
+  assert.deepEqual(postedMessages, ["Reading files.", "⚙️ 1 cmd"]);
   assert.deepEqual(updatedMessages, [
     {
       messageTs: "slack-progress-1",
-      message: "⚙️ 1 cmd"
-    },
-    {
-      messageTs: "slack-progress-2",
       message: "Editing README.md"
     },
     {
       messageTs: "slack-progress-1",
-      message: "⚙️ 1 cmd"
+      message: "Finished."
     },
     {
       messageTs: "slack-progress-2",
-      message: "Finished."
+      message: "⚙️ 1 cmd"
     }
   ]);
 });

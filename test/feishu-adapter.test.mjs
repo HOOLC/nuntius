@@ -136,7 +136,7 @@ test("Feishu rewrites markdown into plain-text-friendly output", async () => {
   );
 });
 
-test("Feishu latest progress mode keeps tool counts and latest status in separate messages", async () => {
+test("Feishu latest progress mode keeps separate tool-count and status messages without placeholders", async () => {
   const postedMessages = [];
   const updatedMessages = [];
 
@@ -181,11 +181,11 @@ test("Feishu latest progress mode keeps tool counts and latest status in separat
     [
       {
         messageId: "om-working-1",
-        text: "🧰 0 tool updates"
+        text: "Reading files."
       },
       {
         messageId: "om-working-2",
-        text: "Reading files."
+        text: "⚙️ 1 cmd"
       }
     ]
   );
@@ -197,19 +197,15 @@ test("Feishu latest progress mode keeps tool counts and latest status in separat
     [
       {
         messageId: "om-working-1",
-        text: "⚙️ 1 cmd"
-      },
-      {
-        messageId: "om-working-2",
         text: "Editing README.md"
       },
       {
         messageId: "om-working-1",
-        text: "⚙️ 1 cmd"
+        text: "Finished."
       },
       {
         messageId: "om-working-2",
-        text: "Finished."
+        text: "⚙️ 1 cmd"
       }
     ]
   );

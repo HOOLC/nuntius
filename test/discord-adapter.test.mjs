@@ -168,7 +168,7 @@ test("Discord adapter rewrites markdown links into readable text", async () => {
   ]);
 });
 
-test("Discord latest progress mode keeps tool counts and latest status in separate editable messages", async () => {
+test("Discord latest progress mode keeps separate editable tool-count and status messages without placeholders", async () => {
   const messages = [];
   const progressMessages = [];
   const progressEdits = [];
@@ -216,29 +216,25 @@ test("Discord latest progress mode keeps tool counts and latest status in separa
   assert.deepEqual(progressMessages, [
     {
       messageId: "progress-1",
-      message: "🧰 0 tool updates"
+      message: "Reading files."
     },
     {
       messageId: "progress-2",
-      message: "Reading files."
+      message: "⚙️ 1 cmd"
     }
   ]);
   assert.deepEqual(progressEdits, [
     {
       messageId: "progress-1",
-      message: "⚙️ 1 cmd"
-    },
-    {
-      messageId: "progress-2",
       message: "Editing README.md"
     },
     {
       messageId: "progress-1",
-      message: "⚙️ 1 cmd"
+      message: "Finished."
     },
     {
       messageId: "progress-2",
-      message: "Finished."
+      message: "⚙️ 1 cmd"
     }
   ]);
 });

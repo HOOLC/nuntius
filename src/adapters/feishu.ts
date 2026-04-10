@@ -15,7 +15,6 @@ import {
   createProcessingStatusSynchronizer
 } from "./shared.js";
 import {
-  buildInitialToolSummary,
   splitLatestProgressMessage
 } from "../latest-progress.js";
 import {
@@ -85,7 +84,7 @@ class FeishuPublisher implements TurnPublisher {
     );
 
     if (this.shouldReplaceLatestMessage()) {
-      await this.setLatestModeMessages(replyText, language);
+      await this.setLatestModeMessages(replyText);
       return;
     }
 
@@ -104,11 +103,11 @@ class FeishuPublisher implements TurnPublisher {
   async publishProgress(
     _: InboundTurn,
     message: string,
-    language: ConversationLanguage
+    _language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
     if (this.shouldReplaceLatestMessage()) {
-      await this.setLatestModeMessages(message, language);
+      await this.setLatestModeMessages(message);
       return;
     }
 
@@ -123,7 +122,7 @@ class FeishuPublisher implements TurnPublisher {
     await this.syncProcessingStatus("finished");
     const replyText = formatFeishuReplyText(message.text, message.truncated, language);
     if (this.shouldReplaceLatestMessage()) {
-      await this.setLatestModeMessages(replyText, language);
+      await this.setLatestModeMessages(replyText);
     } else {
       await this.envelope.postMessage(renderFeishuTextMessage(replyText));
     }
@@ -172,7 +171,7 @@ class FeishuPublisher implements TurnPublisher {
     );
 
     if (this.shouldReplaceLatestMessage()) {
-      await this.setLatestModeMessages(replyText, language);
+      await this.setLatestModeMessages(replyText);
       return;
     }
 
@@ -187,7 +186,7 @@ class FeishuPublisher implements TurnPublisher {
     await this.syncProcessingStatus("failed");
     const replyText = formatFeishuErrorText(errorMessage, language);
     if (this.shouldReplaceLatestMessage()) {
-      await this.setLatestModeMessages(replyText, language);
+      await this.setLatestModeMessages(replyText);
       return;
     }
 
@@ -208,22 +207,15 @@ class FeishuPublisher implements TurnPublisher {
     return undefined;
   }
 
-  private async setLatestModeMessages(
-    message: string,
-    language: ConversationLanguage
-  ): Promise<void> {
+  private async setLatestModeMessages(message: string): Promise<void> {
     const parts = splitLatestProgressMessage(message);
-
-    if (parts.toolSummary) {
-      await this.setToolSummaryMessage(renderFeishuTextMessage(parts.toolSummary));
-    } else if (parts.latestMessage && !this.toolSummaryMessageId) {
-      await this.setToolSummaryMessage(
-        renderFeishuTextMessage(buildInitialToolSummary(language))
-      );
-    }
 
     if (parts.latestMessage) {
       await this.setProgressMessage(renderFeishuTextMessage(parts.latestMessage));
+    }
+
+    if (parts.toolSummary) {
+      await this.setToolSummaryMessage(renderFeishuTextMessage(parts.toolSummary));
     }
   }
 

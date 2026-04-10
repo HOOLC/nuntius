@@ -15,7 +15,6 @@ import {
   createProcessingStatusSynchronizer
 } from "./shared.js";
 import {
-  buildInitialToolSummary,
   splitLatestProgressMessage
 } from "../latest-progress.js";
 import { trimCodeFencePayload } from "../text-formatting.js";
@@ -82,8 +81,7 @@ class SlackPublisher implements TurnPublisher {
             en: "Queued behind the active Codex turn for this thread.",
             zh: "当前线程已有进行中的 Codex turn，本条消息已进入队列。"
           })
-        ),
-        language
+        )
       );
       return;
     }
@@ -112,11 +110,11 @@ class SlackPublisher implements TurnPublisher {
   async publishProgress(
     _: InboundTurn,
     message: string,
-    language: ConversationLanguage
+    _language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
     if (this.shouldReplaceLatestMessage()) {
-      await this.setLatestModeMessages(message, language);
+      await this.setLatestModeMessages(message);
       return;
     }
 
@@ -137,7 +135,7 @@ class SlackPublisher implements TurnPublisher {
       : "";
     const reply = `${message.text}${suffix}`;
     if (this.shouldReplaceLatestMessage()) {
-      await this.setLatestModeMessages(reply, language);
+      await this.setLatestModeMessages(reply);
       return;
     }
 
@@ -158,8 +156,7 @@ class SlackPublisher implements TurnPublisher {
             zh: "已中断"
           }),
           message
-        ),
-        language
+        )
       );
       return;
     }
@@ -181,7 +178,7 @@ class SlackPublisher implements TurnPublisher {
     await this.syncProcessingStatus("failed");
     const reply = renderSlackError(errorMessage, language);
     if (this.shouldReplaceLatestMessage()) {
-      await this.setLatestModeMessages(reply, language);
+      await this.setLatestModeMessages(reply);
       return;
     }
 
@@ -208,20 +205,15 @@ class SlackPublisher implements TurnPublisher {
     return this.envelope.progressMode === "latest";
   }
 
-  private async setLatestModeMessages(
-    message: string,
-    language: ConversationLanguage
-  ): Promise<void> {
+  private async setLatestModeMessages(message: string): Promise<void> {
     const parts = splitLatestProgressMessage(message);
-
-    if (parts.toolSummary) {
-      await this.setToolSummaryMessage(parts.toolSummary);
-    } else if (parts.latestMessage && !this.toolSummaryMessageTs) {
-      await this.setToolSummaryMessage(buildInitialToolSummary(language));
-    }
 
     if (parts.latestMessage) {
       await this.setMessage(parts.latestMessage);
+    }
+
+    if (parts.toolSummary) {
+      await this.setToolSummaryMessage(parts.toolSummary);
     }
   }
 

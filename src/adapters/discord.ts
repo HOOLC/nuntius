@@ -23,7 +23,6 @@ import {
   trimCodeFencePayload
 } from "../text-formatting.js";
 import {
-  buildInitialToolSummary,
   splitLatestProgressMessage
 } from "../latest-progress.js";
 
@@ -83,7 +82,7 @@ class DiscordPublisher implements TurnPublisher {
     );
 
     if (this.shouldReplaceLatestMessage()) {
-      await this.publishLatestModeMessages(reply, language);
+      await this.publishLatestModeMessages(reply);
       return;
     }
 
@@ -102,11 +101,11 @@ class DiscordPublisher implements TurnPublisher {
   async publishProgress(
     _: InboundTurn,
     message: string,
-    language: ConversationLanguage
+    _language: ConversationLanguage
   ): Promise<void> {
     await this.syncProcessingStatus("working");
     if (this.shouldReplaceLatestMessage()) {
-      await this.publishLatestModeMessages(renderDiscordReply(message), language);
+      await this.publishLatestModeMessages(renderDiscordReply(message));
       return;
     }
 
@@ -127,7 +126,7 @@ class DiscordPublisher implements TurnPublisher {
       : "";
     const reply = renderDiscordReply(`${message.text}${suffix}`);
     if (this.shouldReplaceLatestMessage()) {
-      await this.publishLatestModeMessages(reply, language);
+      await this.publishLatestModeMessages(reply);
       return;
     }
 
@@ -149,7 +148,7 @@ class DiscordPublisher implements TurnPublisher {
       message
     );
     if (this.shouldReplaceLatestMessage()) {
-      await this.publishLatestModeMessages(reply, language);
+      await this.publishLatestModeMessages(reply);
       return;
     }
 
@@ -168,7 +167,7 @@ class DiscordPublisher implements TurnPublisher {
     await this.syncProcessingStatus("failed");
     const reply = renderDiscordError(errorMessage, language);
     if (this.shouldReplaceLatestMessage()) {
-      await this.publishLatestModeMessages(reply, language);
+      await this.publishLatestModeMessages(reply);
       return;
     }
 
@@ -271,20 +270,15 @@ class DiscordPublisher implements TurnPublisher {
     return this.envelope.progressMode === "latest";
   }
 
-  private async publishLatestModeMessages(
-    message: string,
-    language: ConversationLanguage
-  ): Promise<void> {
+  private async publishLatestModeMessages(message: string): Promise<void> {
     const parts = splitLatestProgressMessage(message);
-
-    if (parts.toolSummary) {
-      await this.setToolSummaryMessage(parts.toolSummary);
-    } else if (parts.latestMessage && !this.toolSummaryMessage) {
-      await this.setToolSummaryMessage(buildInitialToolSummary(language));
-    }
 
     if (parts.latestMessage) {
       await this.setProgressMessage(parts.latestMessage);
+    }
+
+    if (parts.toolSummary) {
+      await this.setToolSummaryMessage(parts.toolSummary);
     }
   }
 }
