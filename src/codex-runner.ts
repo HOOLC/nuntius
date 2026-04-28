@@ -214,10 +214,6 @@ export class CodexRunner {
       });
       client.notify(APP_SERVER_INITIALIZED_METHOD);
 
-      if (interruptRequested && !turnId) {
-        throw new CodexTurnInterruptedError(undefined, sessionId);
-      }
-
       if (request.sessionId) {
         const response = await client.request("thread/resume", buildResumeParams(request));
         sessionId = extractThreadId(response) ?? sessionId;
@@ -232,6 +228,7 @@ export class CodexRunner {
 
       const turnStartResponse = await client.request("turn/start", buildTurnStartParams(request, sessionId));
       turnId = extractTurnId(turnStartResponse) ?? turnId;
+      void interruptState.requestPendingInterrupt();
 
       const exitResult = await Promise.race([
         turnOutcome.promise,
@@ -638,17 +635,38 @@ function installInterruptHandler(input: {
   requestInterrupt: (threadId: string, turnId: string) => Promise<void>;
 }): {
   cleanup: () => void;
+  requestPendingInterrupt: () => Promise<void>;
 } {
   const { child, signal } = input;
   if (!signal) {
     return {
-      cleanup: () => undefined
+      cleanup: () => undefined,
+      requestPendingInterrupt: async () => undefined
     };
   }
 
   let sigtermTimer: NodeJS.Timeout | undefined;
   let sigkillTimer: NodeJS.Timeout | undefined;
   let handled = false;
+  let interruptRequestPromise: Promise<void> | undefined;
+
+  const requestPendingInterrupt = async () => {
+    if (!handled || interruptRequestPromise) {
+      return interruptRequestPromise;
+    }
+    const threadId = input.getThreadId();
+    const turnId = input.getTurnId();
+    if (!threadId || !turnId) {
+      return undefined;
+    }
+
+    interruptRequestPromise = input.requestInterrupt(threadId, turnId).catch(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+      }
+    });
+    return interruptRequestPromise;
+  };
 
   const requestInterrupt = () => {
     if (handled) {
@@ -657,18 +675,7 @@ function installInterruptHandler(input: {
 
     handled = true;
     input.onInterruptRequested();
-
-    const threadId = input.getThreadId();
-    const turnId = input.getTurnId();
-    if (threadId && turnId) {
-      void input.requestInterrupt(threadId, turnId).catch(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          child.kill("SIGTERM");
-        }
-      });
-    } else if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-    }
+    void requestPendingInterrupt();
 
     sigtermTimer = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) {
@@ -698,7 +705,8 @@ function installInterruptHandler(input: {
       if (sigkillTimer) {
         clearTimeout(sigkillTimer);
       }
-    }
+    },
+    requestPendingInterrupt
   };
 }
 
