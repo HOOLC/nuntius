@@ -3,12 +3,23 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "nuntiusctl": "dist/nuntius-service-cli.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "discord:register": "node dist/register-discord-commands.js",
     "discord:start": "node dist/discord-bot.js",
     "feishu:start": "node dist/feishu-bot.js",
     "im:local": "node dist/local-im-cli.js",
+    "service": "node dist/nuntius-service-cli.js",
+    "service:install": "node dist/nuntius-service-cli.js install",
+    "service:logs": "node dist/nuntius-service-cli.js logs",
+    "service:restart": "node dist/nuntius-service-cli.js restart",
+    "service:start": "node dist/nuntius-service-cli.js start",
+    "service:status": "node dist/nuntius-service-cli.js status",
+    "service:stop": "node dist/nuntius-service-cli.js stop",
+    "service:uninstall": "node dist/nuntius-service-cli.js uninstall",
     "slack:start": "node dist/slack-bot.js",
     "test": "npm run build && node --test test/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",

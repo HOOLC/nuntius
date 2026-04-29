@@ -15,6 +15,7 @@ Start with [docs/im-codex-bridge-design.md](/home/nomofu/nuntius/docs/im-codex-b
 - `src/index.ts`: combined launcher that starts configured integrations
 - `src/discord-bot*.ts`, `src/slack-bot.ts`, `src/feishu-bot.ts`: platform adapters and admin flows
 - `src/worker-supervisor.ts`, `src/process-guard.ts`, `src/persistent-launch.ts`: hot reload, restart, and persistent-launch support
+- `src/service-manager.ts`, `src/nuntius-service-cli.ts`: launchd/systemd user service management and CLI
 - `config/*.toml`: sample bridge and repository registry config
 - `docs/*.md`: operator-facing setup and design docs
 - `test/*.test.mjs`: Node test suite
@@ -31,6 +32,12 @@ Start with [docs/im-codex-bridge-design.md](/home/nomofu/nuntius/docs/im-codex-b
 - `npm run discord:register`
 - `npm run feishu:start`
 - `npm run slack:start`
+- `npm run service:install`: install the user-level service definition
+- `npm run service:start`
+- `npm run service:stop`
+- `npm run service:restart`
+- `npm run service:status`
+- `npm run service:logs`
 
 ## Config Model
 

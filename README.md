@@ -90,6 +90,7 @@ Setup guides:
 - [docs/slack-setup.md](docs/slack-setup.md)
 - [docs/discord-setup.md](docs/discord-setup.md)
 - [docs/feishu-setup.md](docs/feishu-setup.md)
+- [docs/service-management.md](docs/service-management.md)
 
 ## Manual Setup
 
@@ -108,6 +109,9 @@ npm run slack:start
 npm run discord:start
 npm run feishu:start
 npm run start
+npm run service:install
+npm run service:start
+npm run service:status
 ```
 
 If you want a local dry run without a real chat platform:
@@ -121,6 +125,7 @@ For actual configuration details, use:
 - [config/nuntius.example.toml](config/nuntius.example.toml)
 - [config/repository-registry.example.toml](config/repository-registry.example.toml)
 - [README.agent.md](README.agent.md)
+- [docs/service-management.md](docs/service-management.md)
 
 ## Further Reading
 
@@ -128,4 +133,5 @@ For actual configuration details, use:
 - [docs/slack-setup.md](docs/slack-setup.md)
 - [docs/discord-setup.md](docs/discord-setup.md)
 - [docs/feishu-setup.md](docs/feishu-setup.md)
+- [docs/service-management.md](docs/service-management.md)
 - [README.agent.md](README.agent.md)

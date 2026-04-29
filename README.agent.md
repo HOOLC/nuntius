@@ -33,6 +33,7 @@ Read these before editing config or starting the service:
    - [docs/slack-setup.md](docs/slack-setup.md)
    - [docs/discord-setup.md](docs/discord-setup.md)
    - [docs/feishu-setup.md](docs/feishu-setup.md)
+   - [docs/service-management.md](docs/service-management.md)
 
 ## Inputs You Need From The Human
 
@@ -217,6 +218,17 @@ npm run feishu:start
 npm run start
 ```
 
+#### Managed user service
+
+To install a user-level service for the combined launcher:
+
+```bash
+npm run service:install -- --config /absolute/path/to/nuntius.toml
+npm run service:start
+```
+
+Use `--integration discord`, `--integration feishu`, or `--integration slack` to install a single-platform service. See [docs/service-management.md](docs/service-management.md).
+
 ### 9. Verify live behavior
 
 Use the relevant platform flow:
@@ -241,7 +253,7 @@ Before you say setup is complete, confirm:
 - the requested integration process starts without immediate failure
 - tests or at least build/typecheck ran successfully
 - any required Discord command registration was completed
-- the operator knows how to restart the service under their supervisor
+- the operator knows whether the bot is running directly, under the bundled restart guard, or as a managed user service with `npm run service:*`
 
 ## Suggested Prompts An Agent Can Follow
 
@@ -278,6 +290,7 @@ After setup, these files matter most for maintenance:
 - `src/discord-bot-worker.ts`: Discord entrypoint
 - `src/feishu-bot.ts`: Feishu entrypoint
 - `src/worker-supervisor.ts`, `src/process-guard.ts`, `src/persistent-launch.ts`: reload/restart behavior
+- `src/service-manager.ts`, `src/nuntius-service-cli.ts`: managed service files and CLI
 - `test/`: regression coverage
 
 ## Editing Rules If Setup Turns Into Development

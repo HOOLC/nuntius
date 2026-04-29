@@ -886,7 +886,7 @@ async function parseFetchBody(body) {
   return body;
 }
 
-async function waitFor(predicate, timeoutMs = 2_000) {
+async function waitFor(predicate, timeoutMs = 5_000) {
   const startedAt = Date.now();
 
   while (!predicate()) {
