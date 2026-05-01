@@ -18,9 +18,10 @@ import type {
 import { toConversationKey } from "./domain.js";
 import { buildImReplyFormatRules } from "./im-response-format.js";
 import { sanitizeUserFacingText } from "./user-facing-text.js";
-import { WAKE_AFTER_ACTION_USAGE } from "./worker-protocol.js";
+import { WAKE_AFTER_TOOL_USAGE } from "./worker-protocol.js";
 
-const HANDLER_SESSION_CONFIG_VERSION = 2;
+const HANDLER_SESSION_CONFIG_VERSION = 3;
+const WORKER_SESSION_CONFIG_VERSION = 2;
 
 export function createConversationBinding(turn: InboundTurn): ConversationBinding {
   const now = new Date().toISOString();
@@ -257,11 +258,13 @@ export function buildWorkerPrompt(
   }
 
   lines.push(
-    "Bridge action tags available in worker replies:",
-    `- ${WAKE_AFTER_ACTION_USAGE}`,
-    "- Use WAKE_AFTER only when the task genuinely requires time to pass before you continue.",
-    "- Keep a short plain-text status update beside the action tag when replying to the user.",
-    "- Action tags are stripped from the user-visible reply.",
+    "Native bridge tools available to this worker session:",
+    `- ${WAKE_AFTER_TOOL_USAGE}`,
+    "- Use `nuntius.wake_after` only when the task genuinely requires time to pass before you continue.",
+    "- Bridge control is available only through native tool calls, not visible text.",
+    "- Do not use handler-only routing tools such as bind_repo, delegate_to_worker, reset_thread, or schedule_task from worker sessions.",
+    "- If the user asks to switch repositories or reset routing, tell them to use `/codex bind <repo-id>` or `/codex reset` instead.",
+    "- Keep a short plain-text status update in your final reply when requesting a wake-up.",
     "- When the timer fires, nuntius resumes this same worker session in the background with a wake-up prompt.",
     "- Background wake-up turns are not automatically posted back to chat, so use them for waiting, polling, monitoring, and follow-up work.",
     "",
@@ -370,6 +373,7 @@ function deriveRepositoryBinding(
     codexConfigOverrides: repository.codexConfigOverrides ?? [],
     allowCodexNetworkAccess: Boolean(repository.allowCodexNetworkAccess),
     codexNetworkAccessWorkspacePath: repository.codexNetworkAccessWorkspacePath,
+    workerProtocolVersion: WORKER_SESSION_CONFIG_VERSION,
     workerSessionId: reuseWorkerSession ? previous?.workerSessionId : undefined,
     pendingWakeRequest: reuseWorkerSession ? previous?.pendingWakeRequest : undefined,
     updatedAt
@@ -395,6 +399,7 @@ function shouldReuseWorkerSession(
 
   return (
     previous.repositoryPath === repository.path &&
+    previous.workerProtocolVersion === WORKER_SESSION_CONFIG_VERSION &&
     previousBoundByUserId === boundByUserId &&
     previous.sandboxMode === sandboxMode &&
     previous.model === repository.model &&
@@ -417,6 +422,7 @@ function repositoryBindingsEquivalent(
     left?.sandboxMode === right?.sandboxMode &&
     left?.model === right?.model &&
     left?.approvalPolicy === right?.approvalPolicy &&
+    left?.workerProtocolVersion === right?.workerProtocolVersion &&
     Boolean(left?.allowCodexNetworkAccess) === Boolean(right?.allowCodexNetworkAccess) &&
     left?.codexNetworkAccessWorkspacePath === right?.codexNetworkAccessWorkspacePath &&
     left?.workerSessionId === right?.workerSessionId &&

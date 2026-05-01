@@ -25,9 +25,15 @@ import type {
   RepositoryBinding
 } from "./domain.js";
 import { conversationKeyToId, toConversationKey } from "./domain.js";
-import { CodexTurnInterruptedError, type CodexRunner } from "./codex-runner.js";
 import {
+  CodexTurnInterruptedError,
+  type CodexDynamicToolCallResponse,
+  type CodexRunner
+} from "./codex-runner.js";
+import {
+  buildHandlerDynamicTools,
   buildHandlerUserPrompt,
+  parseHandlerToolCall,
   parseHandlerDecision,
   type HandlerDecision
 } from "./handler-protocol.js";
@@ -73,9 +79,12 @@ import type { SessionStore } from "./session-store.js";
 import type { TurnPublisher } from "./turn-publisher.js";
 import { sanitizeUserFacingText } from "./user-facing-text.js";
 import {
-  WAKE_AFTER_ACTION_USAGE,
+  WAKE_AFTER_TOOL_USAGE,
+  buildWorkerDynamicTools,
   formatWakeDuration,
-  parseWorkerDecision
+  parseWorkerDecision,
+  parseWorkerToolCall,
+  type WorkerControlAction
 } from "./worker-protocol.js";
 
 const SCHEDULED_TASK_EXECUTION_LEASE_MS = 10 * 60_000;
@@ -484,6 +493,7 @@ export class CodexBridgeService {
 
     return this.runWithActiveTurn(turn, { actor: "handler" }, async (signal) => {
       let result;
+      const nativeActions: HandlerDecision["actions"] = [];
       try {
         progress.start();
         result = await this.runner.runTurn({
@@ -494,6 +504,16 @@ export class CodexBridgeService {
           sessionId: binding.handlerSessionId,
           model: handlerConfig.model,
           addDirs: listAttachmentAddDirs(turn.attachments),
+          dynamicTools: buildHandlerDynamicTools(),
+          onDynamicToolCall: (call) => {
+            try {
+              const action = parseHandlerToolCall(call);
+              nativeActions.push(action);
+              return buildDynamicToolTextResponse(describeHandlerToolAction(action), true);
+            } catch (error) {
+              return buildDynamicToolTextResponse(formatToolError(error), false);
+            }
+          },
           onEvent: (event) => {
             progress.onEvent(event);
           },
@@ -519,7 +539,7 @@ export class CodexBridgeService {
           handlerConfig,
           updatedAt: new Date().toISOString()
         },
-        decision: parseHandlerDecision(result.responseText),
+        decision: mergeHandlerDecision(result.responseText, nativeActions),
         latestToolSummary: progress.getLatestToolSummary()
       };
     });
@@ -1070,11 +1090,12 @@ export class CodexBridgeService {
     }
 
     const worker = binding.activeRepository;
+    const language = binding.language ?? resolveConversationLanguage({ text: turn.text });
     const prompt = buildWorkerPrompt(worker, turn, workerPrompt);
     const progress = new CodexRunProgressReporter(turn, publisher, {
       actor: "worker",
       repositoryId: worker.repositoryId,
-      language: binding.language ?? resolveConversationLanguage({ text: turn.text })
+      language
     }, {
       mode: this.config.progressUpdates
     });
@@ -1085,6 +1106,7 @@ export class CodexBridgeService {
     }
 
     let result;
+    const nativeActions: WorkerControlAction[] = [];
     try {
       progress.start();
       result = await this.runner.runTurn({
@@ -1098,6 +1120,16 @@ export class CodexBridgeService {
         networkAccessEnabled: hasCodexNetworkAccess(worker),
         addDirs: mergeAddDirs(listWorkerAddDirs(worker), listAttachmentAddDirs(turn.attachments)),
         configOverrides: worker.codexConfigOverrides,
+        dynamicTools: buildWorkerDynamicTools(),
+        onDynamicToolCall: (call) => {
+          try {
+            const action = parseWorkerToolCall(call);
+            nativeActions.push(action);
+            return buildDynamicToolTextResponse(describeWorkerToolAction(action, language), true);
+          } catch (error) {
+            return buildDynamicToolTextResponse(formatToolError(error), false);
+          }
+        },
         onEvent: (event) => {
           progress.onEvent(event);
         },
@@ -1116,7 +1148,7 @@ export class CodexBridgeService {
           buildCodexNetworkAccessFailureMessage(
             worker,
             error.message,
-            binding.language ?? resolveConversationLanguage({ text: turn.text })
+            language
           )
         );
       }
@@ -1127,7 +1159,7 @@ export class CodexBridgeService {
     }
 
     const documentFilesAfter = await captureTrackedDocumentFiles(turn.attachments);
-    const workerDecision = parseWorkerDecision(result.responseText);
+    const workerDecision = mergeWorkerDecision(result.responseText, nativeActions);
 
     return {
       binding: this.buildWorkerResultBinding(binding, worker, result.sessionId, workerDecision),
@@ -1649,8 +1681,8 @@ export class CodexBridgeService {
         zh: "现在继续这个 session 里的等待、轮询或监控任务。"
       }),
       localize(language, {
-        en: `If you still need more time, include ${WAKE_AFTER_ACTION_USAGE} in your reply.`,
-        zh: `如果还需要更多时间，请在回复里加入 ${WAKE_AFTER_ACTION_USAGE}。`
+        en: `If you still need more time, call ${WAKE_AFTER_TOOL_USAGE}.`,
+        zh: `如果还需要更多时间，请调用 ${WAKE_AFTER_TOOL_USAGE}。`
       }),
       localize(language, {
         en: "This is a background wake-up turn. Its plain-text reply is not automatically posted back to chat.",
@@ -1673,7 +1705,7 @@ export class CodexBridgeService {
     const nowIso = now.toISOString();
 
     if (wakeAction && !workerSessionId) {
-      throw new Error("WAKE_AFTER requires an active worker session id.");
+      throw new Error("wake_after requires an active worker session id.");
     }
 
     return {
@@ -1694,6 +1726,87 @@ export class CodexBridgeService {
       updatedAt: nowIso
     };
   }
+}
+
+function mergeHandlerDecision(
+  responseText: string,
+  nativeActions: HandlerDecision["actions"]
+): HandlerDecision {
+  if (!responseText.trim() && nativeActions.length > 0) {
+    return {
+      actions: nativeActions
+    };
+  }
+
+  const parsed = parseHandlerDecision(responseText);
+  if (nativeActions.length === 0) {
+    return parsed;
+  }
+
+  return {
+    ...parsed,
+    actions: [...nativeActions, ...parsed.actions]
+  };
+}
+
+function mergeWorkerDecision(
+  responseText: string,
+  nativeActions: WorkerControlAction[]
+): ReturnType<typeof parseWorkerDecision> {
+  const parsed = parseWorkerDecision(responseText);
+  if (nativeActions.length === 0) {
+    return parsed;
+  }
+
+  return {
+    ...parsed,
+    actions: [...nativeActions, ...parsed.actions]
+  };
+}
+
+function buildDynamicToolTextResponse(
+  text: string,
+  success: boolean
+): CodexDynamicToolCallResponse {
+  return {
+    contentItems: [
+      {
+        type: "inputText",
+        text
+      }
+    ],
+    success
+  };
+}
+
+function describeHandlerToolAction(action: HandlerDecision["actions"][number]): string {
+  switch (action.action) {
+    case "bind_repo":
+      return `Recorded repository binding to "${action.repositoryId}".`;
+    case "delegate":
+      return "Recorded worker delegation.";
+    case "schedule_task":
+      return `Recorded scheduled task request for "${action.repositoryId}".`;
+    case "reset":
+      return `Recorded reset request for scope "${action.scope}".`;
+  }
+}
+
+function describeWorkerToolAction(
+  action: WorkerControlAction,
+  language: ConversationLanguage
+): string {
+  switch (action.action) {
+    case "wake_after":
+      return localize(language, {
+        en: `Recorded wake-up request for ${formatWakeDuration(action.durationMs, language)}.`,
+        zh: `已记录 ${formatWakeDuration(action.durationMs, language)}后的唤醒请求。`
+      });
+  }
+}
+
+function formatToolError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 const NOOP_TURN_PUBLISHER: TurnPublisher = {

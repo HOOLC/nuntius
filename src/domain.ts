@@ -45,6 +45,7 @@ export interface RepositoryBinding {
   codexConfigOverrides?: string[];
   allowCodexNetworkAccess?: boolean;
   codexNetworkAccessWorkspacePath?: string;
+  workerProtocolVersion?: number;
   workerSessionId?: string;
   pendingWakeRequest?: WorkerWakeRequest;
   updatedAt: string;

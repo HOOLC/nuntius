@@ -38,12 +38,17 @@ test("top-level handler sessions can create scheduled tasks without binding the 
         if (request.repositoryPath === handlerDir) {
           assert.match(request.prompt, /Available repositories and settings:/);
           assert.match(request.prompt, /repo \(sandbox=workspace-write, model=default, codex_network_access=disabled\)/);
+          const result = await request.onDynamicToolCall(
+            buildNuntiusToolCall("schedule_task", {
+              repositoryId: "repo",
+              schedule: "every 1 hour",
+              taskPrompt: "check status"
+            })
+          );
+          assert.equal(result.success, true);
           return {
             sessionId: "handler-session-1",
-            responseText: [
-              '[[ACTION:SCHEDULE({"repositoryId":"repo","schedule":"every 1 hour","taskPrompt":"check status"})]]',
-              "Creating the scheduled task."
-            ].join("\n"),
+            responseText: "Creating the scheduled task.",
             rawEvents: [],
             stderrLines: []
           };
@@ -205,12 +210,17 @@ test("runDueScheduledTasks executes due tasks and stops when status.md requests 
       async runTurn(request) {
         calls.push(request);
         if (request.repositoryPath === handlerDir) {
+          const result = await request.onDynamicToolCall(
+            buildNuntiusToolCall("schedule_task", {
+              repositoryId: "repo",
+              schedule: "every 1 second",
+              taskPrompt: "check status"
+            })
+          );
+          assert.equal(result.success, true);
           return {
             sessionId: "handler-session-1",
-            responseText: [
-              '[[ACTION:SCHEDULE({"repositoryId":"repo","schedule":"every 1 second","taskPrompt":"check status"})]]',
-              "Creating the scheduled task."
-            ].join("\n"),
+            responseText: "Creating the scheduled task.",
             rawEvents: [],
             stderrLines: []
           };
@@ -394,6 +404,17 @@ function getOnlyTaskDir(repoDir) {
   const scheduledTaskRoot = path.join(repoDir, ".nuntius", "scheduled-tasks");
   const [taskId] = readdirSync(scheduledTaskRoot);
   return path.join(scheduledTaskRoot, taskId);
+}
+
+function buildNuntiusToolCall(tool, args) {
+  return {
+    threadId: "thread-1",
+    turnId: "turn-1",
+    callId: `call-${tool}`,
+    namespace: "nuntius",
+    tool,
+    arguments: args
+  };
 }
 
 function readTaskIdFromPrompt(prompt) {

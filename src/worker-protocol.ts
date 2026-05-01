@@ -1,8 +1,10 @@
+import type { CodexDynamicToolCall, CodexDynamicToolSpec } from "./codex-runner.js";
 import type { ConversationLanguage } from "./domain.js";
 
 const MAX_WAKE_DURATION_MS = 30 * 24 * 60 * 60_000;
 
-export const WAKE_AFTER_ACTION_USAGE = "[[ACTION:WAKE_AFTER(5m)]]";
+export const WORKER_BRIDGE_TOOL_NAMESPACE = "nuntius";
+export const WAKE_AFTER_TOOL_USAGE = "`nuntius.wake_after` with `{ \"duration\": \"5m\" }`";
 
 export type WorkerControlAction = {
   action: "wake_after";
@@ -14,10 +16,49 @@ export interface WorkerDecision {
   actions: WorkerControlAction[];
 }
 
-interface TaggedWorkerAction {
-  start: number;
-  end: number;
-  action: WorkerControlAction;
+export function buildWorkerDynamicTools(): CodexDynamicToolSpec[] {
+  return [
+    {
+      namespace: WORKER_BRIDGE_TOOL_NAMESPACE,
+      name: "wake_after",
+      description: [
+        "Ask nuntius to wake this same worker session up later in the background.",
+        "Use only when the task genuinely requires time to pass before continuing, such as waiting, polling, or monitoring."
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        properties: {
+          duration: {
+            type: "string",
+            description: "Delay such as 30s, 5m, 2h, or 1d. Maximum is 30 days."
+          }
+        },
+        required: ["duration"],
+        additionalProperties: false
+      }
+    }
+  ];
+}
+
+export function parseWorkerToolCall(
+  call: Pick<CodexDynamicToolCall, "namespace" | "tool" | "arguments">
+): WorkerControlAction {
+  if (call.namespace !== WORKER_BRIDGE_TOOL_NAMESPACE) {
+    throw new Error(
+      `Unsupported worker bridge tool namespace: ${call.namespace ?? "none"}.`
+    );
+  }
+
+  if (call.tool !== "wake_after") {
+    throw new Error(`Unsupported worker bridge tool: ${call.tool}.`);
+  }
+
+  const args = readToolArguments(call.arguments);
+  const duration = readRequiredString(args, "duration");
+  return {
+    action: "wake_after",
+    durationMs: parseWakeDuration(duration)
+  };
 }
 
 export function parseWorkerDecision(rawText: string): WorkerDecision {
@@ -29,18 +70,9 @@ export function parseWorkerDecision(rawText: string): WorkerDecision {
     };
   }
 
-  if (!trimmed.includes("[[ACTION:")) {
-    return {
-      message: trimmed,
-      actions: []
-    };
-  }
-
-  const taggedActions = scanTaggedActions(rawText);
-  const message = stripTaggedActions(rawText, taggedActions);
   return {
-    message: message || undefined,
-    actions: taggedActions.map((taggedAction) => taggedAction.action)
+    message: trimmed,
+    actions: []
   };
 }
 
@@ -87,90 +119,16 @@ export function formatWakeDuration(
   return language === "zh" ? `${durationMs}毫秒` : `${durationMs} ms`;
 }
 
-function scanTaggedActions(rawText: string): TaggedWorkerAction[] {
-  const actions: TaggedWorkerAction[] = [];
-  let cursor = 0;
-
-  while (cursor < rawText.length) {
-    const start = rawText.indexOf("[[ACTION:", cursor);
-    if (start < 0) {
-      break;
-    }
-
-    const actionNameStart = start + "[[ACTION:".length;
-    const openParen = rawText.indexOf("(", actionNameStart);
-    if (openParen < 0) {
-      throw new Error("Malformed worker action tag.");
-    }
-
-    const actionName = rawText.slice(actionNameStart, openParen).trim().toUpperCase();
-    let depth = 1;
-    let index = openParen + 1;
-
-    while (index < rawText.length && depth > 0) {
-      const character = rawText[index];
-      if (character === "(") {
-        depth += 1;
-      } else if (character === ")") {
-        depth -= 1;
-      }
-      index += 1;
-    }
-
-    if (depth !== 0 || rawText.slice(index, index + 2) !== "]]") {
-      throw new Error("Malformed worker action tag.");
-    }
-
-    const payload = rawText.slice(openParen + 1, index - 1).trim();
-    actions.push({
-      start,
-      end: index + 2,
-      action: parseTaggedAction(actionName, payload)
-    });
-    cursor = index + 2;
-  }
-
-  return actions;
-}
-
-function stripTaggedActions(rawText: string, actions: TaggedWorkerAction[]): string {
-  if (actions.length === 0) {
-    return rawText.trim();
-  }
-
-  let cursor = 0;
-  const segments: string[] = [];
-  for (const action of actions) {
-    segments.push(rawText.slice(cursor, action.start));
-    cursor = action.end;
-  }
-  segments.push(rawText.slice(cursor));
-
-  return segments.join("").replace(/\n{3,}/g, "\n\n").trim();
-}
-
-function parseTaggedAction(actionName: string, payload: string): WorkerControlAction {
-  switch (actionName) {
-    case "WAKE_AFTER":
-      return {
-        action: "wake_after",
-        durationMs: parseWakeDuration(payload)
-      };
-    default:
-      throw new Error(`Unsupported worker action tag: ${actionName}.`);
-  }
-}
-
-function parseWakeDuration(payload: string): number {
+export function parseWakeDuration(payload: string): number {
   const normalized = payload.trim().toLowerCase();
   const match = normalized.match(/^(\d+)\s*(s|m|h|d)$/);
   if (!match) {
-    throw new Error("WAKE_AFTER requires a delay like 30s, 5m, 2h, or 1d.");
+    throw new Error("wake_after requires a delay like 30s, 5m, 2h, or 1d.");
   }
 
   const value = Number.parseInt(match[1] ?? "", 10);
   if (!Number.isFinite(value) || value < 1) {
-    throw new Error("WAKE_AFTER requires a positive integer delay.");
+    throw new Error("wake_after requires a positive integer delay.");
   }
 
   const unit = match[2];
@@ -184,8 +142,25 @@ function parseWakeDuration(payload: string): number {
           : 24 * 60 * 60_000;
   const durationMs = value * multiplier;
   if (durationMs > MAX_WAKE_DURATION_MS) {
-    throw new Error("WAKE_AFTER exceeds the maximum supported delay of 30 days.");
+    throw new Error("wake_after exceeds the maximum supported delay of 30 days.");
   }
 
   return durationMs;
+}
+
+function readToolArguments(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Worker bridge tool arguments must be an object.");
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function readRequiredString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Expected ${key} to be a non-empty string.`);
+  }
+
+  return value;
 }

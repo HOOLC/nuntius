@@ -143,17 +143,18 @@ flowchart LR
 1. The adapter normalizes the IM message into an `InboundTurn`.
 2. The bridge loads the persisted thread binding.
 3. If a repository is already bound, the bridge resumes or creates that worker session directly.
-4. If no repository is bound, the bridge resumes or creates the handler session and asks it for a structured decision in JSON.
+4. If no repository is bound, the bridge resumes or creates the handler session and exposes native `nuntius` bridge tools for routing decisions.
 
-Possible handler decisions:
+Possible handler tool actions:
 
-- `reply`
 - `bind_repo`
-- `reset`
+- `delegate_to_worker`
+- `schedule_task`
+- `reset_thread`
 
 ### Direct Reply
 
-If the handler returns `reply`, the bridge posts that message to Slack or Discord.
+If the handler sends a plain reply without bridge tool calls, the bridge posts that message to Slack or Discord.
 
 Use this for:
 
@@ -164,12 +165,12 @@ Use this for:
 
 ### Bind Repo
 
-If the handler returns `bind_repo`, the bridge:
+If the handler calls `nuntius.bind_repo`, the bridge:
 
 1. validates the repo ID against configured targets
 2. updates the thread binding
 3. clears the old worker session if the repo changed
-4. optionally runs a worker task immediately if the handler included `continueWithWorkerPrompt`
+4. optionally runs a worker task immediately if the handler also called `nuntius.delegate_to_worker`
 5. posts the worker output back to the thread directly instead of routing it through the handler again
 
 ### Direct Worker Follow-up
@@ -195,6 +196,7 @@ type ConversationBinding = {
     repositoryPath: string;
     sandboxMode: "read-only" | "workspace-write" | "danger-full-access";
     model?: string;
+    workerProtocolVersion?: number;
     workerSessionId?: string;
     pendingWakeRequest?: {
       id: string;
@@ -215,44 +217,50 @@ Important rules:
 - `handlerSessionId` survives ordinary repo resets unless the user explicitly resets the whole thread
 - `handlerSessionId` is only used while the thread is unbound
 - `workerSessionId` is valid only for the active repository binding
+- `workerProtocolVersion` prevents reusing worker sessions created before the current native-tool protocol
 - changing repositories clears the old `workerSessionId`
 - a pending worker wake-up request is tied to the current worker session and is cleared by explicit user worker turns, resets, or repository changes
 
-## Worker Wake-Up Action
+## Worker Wake-Up Tool
 
-Repo-scoped worker replies can ask the bridge to wake the same session up later by including:
+Repo-scoped worker sessions get a native Codex dynamic tool:
 
-```text
-[[ACTION:WAKE_AFTER(5m)]]
+```json
+{
+  "namespace": "nuntius",
+  "name": "wake_after",
+  "arguments": { "duration": "5m" }
+}
 ```
 
 Rules:
 
-- action tags are stripped before any visible reply is sent back to the user
 - use `30s`, `5m`, `2h`, or `1d` style delays
 - this is intended for waiting, polling, or monitoring work where the agent needs time to pass before continuing
 - when the timer expires, nuntius resumes the same worker session with an internal wake-up prompt
 - wake-up turns run in the background and do not automatically post their plain-text reply back into chat
+- workers must not call handler-only routing tools such as `bind_repo`, `delegate_to_worker`, `reset_thread`, or `schedule_task`
+- worker wake-ups must be requested with the native tool call; visible reply text never schedules a wake-up
 
 ## Handler Protocol
 
-Because the Codex CLI session is not exposing arbitrary custom tools here, the bridge uses a strict JSON protocol between the handler and the orchestrator.
+Handler sessions get native Codex dynamic tools in the `nuntius` namespace:
 
-Expected handler output:
+- `bind_repo`
+- `delegate_to_worker`
+- `schedule_task`
+- `reset_thread`
 
-```json
-{"action":"reply","message":"Which repo should I use for this thread?"}
-```
+Normal plain-text replies are still allowed when no bridge control is needed. When bridge control is needed, the handler calls the tool instead of putting control syntax in the visible reply.
 
-```json
-{"action":"bind_repo","repositoryId":"nuntius","message":"Bound this thread to nuntius."}
-```
+Examples:
 
-```json
-{"action":"reset","scope":"worker","message":"Cleared the worker session for this thread."}
-```
+- bind-only: call `nuntius.bind_repo` with `{ "repositoryId": "nuntius" }`, then send a short visible status
+- bind and continue work: call `nuntius.bind_repo`, then `nuntius.delegate_to_worker`
+- scheduled task: call `nuntius.schedule_task` with `repositoryId`, `schedule`, and `taskPrompt`
+- reset: call `nuntius.reset_thread` with `scope`
 
-The bridge must validate this JSON. If parsing fails, it should treat that as a handler failure and retry or surface an error.
+The bridge validates tool arguments and records actions from `item/tool/call` callbacks. Visible reply text is never interpreted as bridge control.
 
 ## Repository Binding Model
 

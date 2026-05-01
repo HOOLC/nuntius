@@ -19,9 +19,47 @@ export interface CodexTurnRequest {
   networkAccessEnabled?: boolean;
   addDirs?: string[];
   configOverrides?: string[];
+  dynamicTools?: CodexDynamicToolSpec[];
+  onDynamicToolCall?: CodexDynamicToolHandler;
   onEvent?: (event: CodexEvent) => void;
   signal?: AbortSignal;
 }
+
+export interface CodexDynamicToolSpec {
+  namespace?: string;
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  deferLoading?: boolean;
+}
+
+export interface CodexDynamicToolCall {
+  threadId: string;
+  turnId: string;
+  callId: string;
+  namespace: string | null;
+  tool: string;
+  arguments: unknown;
+}
+
+export type CodexDynamicToolCallOutputContentItem =
+  | {
+      type: "inputText";
+      text: string;
+    }
+  | {
+      type: "inputImage";
+      imageUrl: string;
+    };
+
+export interface CodexDynamicToolCallResponse {
+  contentItems: CodexDynamicToolCallOutputContentItem[];
+  success: boolean;
+}
+
+export type CodexDynamicToolHandler = (
+  call: CodexDynamicToolCall
+) => CodexDynamicToolCallResponse | Promise<CodexDynamicToolCallResponse>;
 
 const INTERRUPT_ESCALATE_TO_SIGTERM_MS = 5_000;
 const INTERRUPT_ESCALATE_TO_SIGKILL_MS = 10_000;
@@ -186,7 +224,7 @@ export class CodexRunner {
       }
     };
 
-    client.onRequest = async (message) => handleServerRequest(message, stderrLines);
+    client.onRequest = async (message) => handleServerRequest(message, stderrLines, request);
 
     const interruptState = installInterruptHandler({
       child,
@@ -210,7 +248,7 @@ export class CodexRunner {
           name: "nuntius",
           version: process.env.npm_package_version ?? "dev"
         },
-        capabilities: null
+        capabilities: buildInitializeCapabilities(request)
       });
       client.notify(APP_SERVER_INITIALIZED_METHOD);
 
@@ -507,7 +545,7 @@ function buildAppServerArgs(request: CodexTurnRequest): string[] {
 }
 
 function buildThreadStartParams(request: CodexTurnRequest): Record<string, unknown> {
-  return {
+  const params: Record<string, unknown> = {
     cwd: request.repositoryPath,
     approvalPolicy: request.approvalPolicy,
     sandbox: request.sandboxMode,
@@ -515,6 +553,12 @@ function buildThreadStartParams(request: CodexTurnRequest): Record<string, unkno
     experimentalRawEvents: false,
     persistExtendedHistory: false
   };
+
+  if (request.dynamicTools?.length) {
+    params.dynamicTools = request.dynamicTools;
+  }
+
+  return params;
 }
 
 function buildResumeParams(request: CodexTurnRequest): Record<string, unknown> {
@@ -550,6 +594,18 @@ function buildTurnStartParams(
     model: request.model,
     sandboxPolicy: buildSandboxPolicy(request)
   };
+}
+
+function buildInitializeCapabilities(
+  request: CodexTurnRequest
+): Record<string, unknown> | null {
+  if (request.dynamicTools?.length || request.onDynamicToolCall) {
+    return {
+      experimentalApi: true
+    };
+  }
+
+  return null;
 }
 
 function buildSandboxPolicy(request: CodexTurnRequest): Record<string, unknown> {
@@ -710,7 +766,11 @@ function installInterruptHandler(input: {
   };
 }
 
-function handleServerRequest(message: JsonRpcRequest, stderrLines: string[]): unknown {
+function handleServerRequest(
+  message: JsonRpcRequest,
+  stderrLines: string[],
+  request: CodexTurnRequest
+): unknown {
   switch (message.method) {
     case "item/commandExecution/requestApproval":
       stderrLines.push(
@@ -759,10 +819,7 @@ function handleServerRequest(message: JsonRpcRequest, stderrLines: string[]): un
         "Nuntius does not support MCP elicitation prompts."
       );
     case "item/tool/call":
-      throw new AppServerRequestError(
-        -32000,
-        "Nuntius does not support app-server dynamic tool callbacks."
-      );
+      return handleDynamicToolCall(message.params, request);
     case "account/chatgptAuthTokens/refresh":
       throw new AppServerRequestError(
         -32000,
@@ -774,6 +831,44 @@ function handleServerRequest(message: JsonRpcRequest, stderrLines: string[]): un
         `Unsupported Codex app server request: ${message.method}`
       );
   }
+}
+
+function handleDynamicToolCall(
+  params: unknown,
+  request: CodexTurnRequest
+): CodexDynamicToolCallResponse | Promise<CodexDynamicToolCallResponse> {
+  if (!request.onDynamicToolCall) {
+    throw new AppServerRequestError(
+      -32000,
+      "Nuntius did not register a handler for app-server dynamic tool callbacks."
+    );
+  }
+
+  const record = readRecord(params);
+  const threadId = readString(record, "threadId");
+  const turnId = readString(record, "turnId");
+  const callId = readString(record, "callId");
+  const tool = readString(record, "tool");
+  const namespaceValue = readUnknown(record, "namespace");
+  const namespace =
+    namespaceValue === null || namespaceValue === undefined
+      ? null
+      : typeof namespaceValue === "string"
+        ? namespaceValue
+        : undefined;
+
+  if (!threadId || !turnId || !callId || !tool || namespace === undefined) {
+    throw new AppServerRequestError(-32602, "Malformed dynamic tool call request.");
+  }
+
+  return request.onDynamicToolCall({
+    threadId,
+    turnId,
+    callId,
+    namespace,
+    tool,
+    arguments: readUnknown(record, "arguments") ?? null
+  });
 }
 
 function parseJsonRpcMessage(line: string): JsonRpcMessage | undefined {

@@ -337,8 +337,8 @@ test("attachment-only turns wait for a later instruction before running the hand
   assert.deepEqual(followUpPublisher.completed, ["Handler saw the attachment."]);
 });
 
-test("worker wake actions schedule a background wake-up turn and strip the action tag from visible replies", async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-wake-"));
+test("worker native bridge tool schedules a background wake-up turn", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-wake-tool-"));
   t.after(() => {
     rmSync(root, { recursive: true, force: true });
   });
@@ -366,23 +366,24 @@ test("worker wake actions schedule a background wake-up turn and strip the actio
           prompt: request.prompt,
           sessionId: request.sessionId
         });
-
-        if (calls.length === 1) {
+        assert.equal(request.dynamicTools.some((tool) => tool.name === "wake_after"), true);
+        if (calls.length > 1) {
           return {
             sessionId: "worker-session-1",
-            responseText: [
-              "Waiting for the deployment window.",
-              "",
-              "[[ACTION:WAKE_AFTER(5m)]]"
-            ].join("\n"),
+            responseText: "The wake-up check is complete.",
             rawEvents: [],
             stderrLines: []
           };
         }
 
+        const result = await request.onDynamicToolCall(
+          buildNuntiusToolCall("wake_after", { duration: "5m" })
+        );
+        assert.equal(result.success, true);
+
         return {
           sessionId: "worker-session-1",
-          responseText: "The wake-up check is complete.",
+          responseText: "Waiting for the deployment window.",
           rawEvents: [],
           stderrLines: []
         };
@@ -400,6 +401,7 @@ test("worker wake actions schedule a background wake-up turn and strip the actio
 
   let status = await service.getConversationStatus(turn);
   assert.equal(status.binding?.activeRepository?.pendingWakeRequest?.durationMs, 300_000);
+  assert.equal(status.binding?.activeRepository?.workerSessionId, "worker-session-1");
 
   await sessionStore.upsert({
     ...status.binding,
@@ -450,9 +452,13 @@ test("new user worker turns clear pending wake requests before running", async (
     {
       async runTurn(request) {
         if (!request.sessionId) {
+          const result = await request.onDynamicToolCall(
+            buildNuntiusToolCall("wake_after", { duration: "5m" })
+          );
+          assert.equal(result.success, true);
           return {
             sessionId: "worker-session-1",
-            responseText: "Monitoring the rollout.\n[[ACTION:WAKE_AFTER(5m)]]",
+            responseText: "Monitoring the rollout.",
             rawEvents: [],
             stderrLines: []
           };
@@ -646,7 +652,7 @@ test("reconcileSessionBindings reloads persisted handler and worker settings fro
     sandboxMode: "read-only",
     approvalPolicy: undefined,
     model: "handler-model-b",
-    sessionConfigVersion: 2
+    sessionConfigVersion: 3
   });
   assert.equal(status.binding?.activeRepository?.repositoryPath, repoDirB);
   assert.equal(status.binding?.activeRepository?.model, "repo-model-b");
@@ -686,10 +692,7 @@ test("stale handler sessions are not resumed after handler config changes", asyn
         calls.push(request);
         return {
           sessionId: request.sessionId ?? "handler-session-2",
-          responseText: JSON.stringify({
-            action: "reply",
-            message: "Handled with fresh config."
-          }),
+          responseText: "Handled with fresh config.",
           rawEvents: [],
           stderrLines: []
         };
@@ -735,7 +738,7 @@ test("stale handler sessions are not resumed after handler config changes", asyn
     sandboxMode: "read-only",
     approvalPolicy: undefined,
     model: "handler-model-b",
-    sessionConfigVersion: 2
+    sessionConfigVersion: 3
   });
 });
 
@@ -764,10 +767,7 @@ test("system replies stay in Chinese after a conversation starts in Chinese", as
       async runTurn(request) {
         return {
           sessionId: request.sessionId ?? "handler-session-zh",
-          responseText: JSON.stringify({
-            action: "reply",
-            message: "已收到。"
-          }),
+          responseText: "已收到。",
           rawEvents: [],
           stderrLines: []
         };
@@ -857,9 +857,13 @@ test("handler can bind a repo from natural language without local parser help", 
           throw new Error("worker should not run for a bind-only handler decision");
         }
 
+        const result = await request.onDynamicToolCall(
+          buildNuntiusToolCall("bind_repo", { repositoryId: "repo" })
+        );
+        assert.equal(result.success, true);
         return {
           sessionId: request.sessionId ?? "handler-session-bind",
-          responseText: '[[ACTION:BIND(repo)]]\nBound this conversation to "repo" via handler.',
+          responseText: 'Bound this conversation to "repo" via handler.',
           rawEvents: [],
           stderrLines: []
         };
@@ -879,8 +883,8 @@ test("handler can bind a repo from natural language without local parser help", 
   assert.equal(status.binding?.handlerSessionId, "handler-session-bind");
 });
 
-test("handler action tags can bind and delegate in the same reply", async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-handler-bind-delegate-"));
+test("handler native bridge tools can bind and delegate in the same turn", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-service-handler-tools-"));
   t.after(() => {
     rmSync(root, { recursive: true, force: true });
   });
@@ -906,20 +910,33 @@ test("handler action tags can bind and delegate in the same reply", async (t) =>
         calls.push(request);
 
         if (request.repositoryPath === handlerDir) {
+          assert.equal(request.dynamicTools.some((tool) => tool.name === "bind_repo"), true);
+          assert.equal(request.dynamicTools.some((tool) => tool.name === "delegate_to_worker"), true);
+          assert.equal(request.dynamicTools.every((tool) => tool.namespace === "nuntius"), true);
+
+          const bindResult = await request.onDynamicToolCall(
+            buildNuntiusToolCall("bind_repo", { repositoryId: "repo" })
+          );
+          const delegateResult = await request.onDynamicToolCall(
+            buildNuntiusToolCall("delegate_to_worker", {
+              workerPrompt: "Inspect the repo now."
+            })
+          );
+
+          assert.equal(bindResult.success, true);
+          assert.equal(delegateResult.success, true);
+
           return {
-            sessionId: "handler-session-bind-delegate",
-            responseText: [
-              "[[ACTION:BIND(repo)]]",
-              "[[ACTION:DELEGATE(Inspect the repo now.)]]",
-              "Binding and handing off."
-            ].join("\n"),
+            sessionId: "handler-session-tools",
+            responseText: "Binding and handing off.",
             rawEvents: [],
             stderrLines: []
           };
         }
 
+        assert.equal(request.dynamicTools.some((tool) => tool.name === "wake_after"), true);
         return {
-          sessionId: "worker-session-bind-delegate",
+          sessionId: "worker-session-tools",
           responseText: "Worker summary output.",
           rawEvents: [],
           stderrLines: []
@@ -927,11 +944,11 @@ test("handler action tags can bind and delegate in the same reply", async (t) =>
       }
     }
   );
-  const router = new InteractionRouter(service);
 
   const publisher = createPublisher();
-  await router.handleTurn(buildTurn("work on repo and inspect it"), publisher);
+  await service.handleTurn(buildTurn("work on repo and inspect it"), publisher);
 
+  assert.equal(calls.length, 2);
   assert.deepEqual(publisher.started, [
     {
       repositoryId: "repo",
@@ -939,8 +956,11 @@ test("handler action tags can bind and delegate in the same reply", async (t) =>
     }
   ]);
   assert.deepEqual(publisher.completed, ["Worker summary output."]);
-  assert.equal(calls[0].repositoryPath, handlerDir);
-  assert.equal(calls[1].repositoryPath, repoDir);
+
+  const status = await service.getConversationStatus(buildTurn("status"));
+  assert.equal(status.binding?.activeRepository?.repositoryId, "repo");
+  assert.equal(status.binding?.handlerSessionId, "handler-session-tools");
+  assert.equal(status.binding?.activeRepository?.workerSessionId, "worker-session-tools");
 });
 
 test("explicit bind commands can bind a repo and immediately run the trailing prompt", async (t) => {
@@ -1021,10 +1041,7 @@ test("unbound handler turns replace legacy sessions and honor the configured san
         calls.push(request);
         return {
           sessionId: request.sessionId ?? "handler-session-upgraded",
-          responseText: JSON.stringify({
-            action: "reply",
-            message: "Handler used configured sandbox."
-          }),
+          responseText: "Handler used configured sandbox.",
           rawEvents: [],
           stderrLines: []
         };
@@ -1066,7 +1083,7 @@ test("unbound handler turns replace legacy sessions and honor the configured san
     sandboxMode: "read-only",
     approvalPolicy: undefined,
     model: undefined,
-    sessionConfigVersion: 2
+    sessionConfigVersion: 3
   });
 });
 
@@ -1100,9 +1117,17 @@ test("yolo mode forces handler and worker turns to run with danger-full-access a
       async runTurn(request) {
         calls.push(request);
         if (calls.length === 1) {
+          const bindResult = await request.onDynamicToolCall(
+            buildNuntiusToolCall("bind_repo", { repositoryId: "repo" })
+          );
+          const delegateResult = await request.onDynamicToolCall(
+            buildNuntiusToolCall("delegate_to_worker", { workerPrompt: "run the task" })
+          );
+          assert.equal(bindResult.success, true);
+          assert.equal(delegateResult.success, true);
           return {
             sessionId: "handler-session-yolo",
-            responseText: "[[ACTION:BIND(repo)]][[ACTION:DELEGATE(run the task)]]",
+            responseText: "",
             rawEvents: [],
             stderrLines: []
           };
@@ -1137,7 +1162,7 @@ test("yolo mode forces handler and worker turns to run with danger-full-access a
     sandboxMode: "danger-full-access",
     approvalPolicy: "never",
     model: undefined,
-    sessionConfigVersion: 2
+    sessionConfigVersion: 3
   });
   assert.equal(status.binding?.activeRepository?.sandboxMode, "danger-full-access");
   assert.equal(status.binding?.activeRepository?.approvalPolicy, "never");
@@ -1879,12 +1904,12 @@ test("handler prompt forces bind-plus-delegate for repo-plus-task requests, incl
     conversationLanguage: "zh"
   });
 
-  assert.match(prompt, /do not stop at BIND/i);
+  assert.match(prompt, /do not stop after bind_repo/i);
   assert.match(prompt, /Concrete repo work includes summaries, status checks/i);
   assert.match(prompt, /Summarize arbitero's current status\./);
   assert.match(prompt, /总结一下 arbitero 的现状。/);
-  assert.match(prompt, /\[\[ACTION:BIND\(arbitero\)\]\]/);
-  assert.match(prompt, /\[\[ACTION:DELEGATE\(总结 arbitero 当前的现状。\)\]\]/);
+  assert.match(prompt, /`nuntius\.bind_repo` with repositoryId `arbitero`/);
+  assert.match(prompt, /`nuntius\.delegate_to_worker` with workerPrompt "总结 arbitero 当前的现状。"/);
 });
 
 test("handler prompt tells Codex to avoid tables and keep replies IM-friendly", () => {
@@ -1925,7 +1950,21 @@ test("worker prompt tells Codex to avoid tables and keep replies IM-friendly", (
   assert.match(prompt, /Do not use Markdown tables in user-visible replies\./);
   assert.match(prompt, /Use short paragraphs, simple lists, and fenced code blocks instead\./);
   assert.match(prompt, /Feishu delivery is especially plain-text oriented/i);
+  assert.match(prompt, /Native bridge tools available to this worker session:/);
+  assert.match(prompt, /`nuntius\.wake_after` with `\{ "duration": "5m" \}`/);
+  assert.match(prompt, /Do not use handler-only routing tools such as bind_repo, delegate_to_worker, reset_thread, or schedule_task/);
 });
+
+function buildNuntiusToolCall(tool, args) {
+  return {
+    threadId: "thread-1",
+    turnId: "turn-1",
+    callId: `call-${tool}`,
+    namespace: "nuntius",
+    tool,
+    arguments: args
+  };
+}
 
 function buildConfig(root, handlerDir, repositoryTargets, overrides = {}) {
   return {
