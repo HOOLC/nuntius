@@ -12,7 +12,6 @@ import {
   Partials,
   type ChatInputCommandInteraction,
   type NewsChannel,
-  type PublicThreadChannel,
   type TextChannel,
   type ThreadChannel
 } from "discord.js";
@@ -39,7 +38,10 @@ import {
   type DiscordInteractionDeliveryState,
   type DiscordSendableChannel
 } from "./discord-delivery.js";
-import { buildDiscordThreadName } from "./discord-thread-name.js";
+import {
+  createConversationThreadFromChannel,
+  createConversationThreadFromMessage
+} from "./discord-thread-creation.js";
 import type { Attachment, ProcessingStatus } from "./domain.js";
 import { isProcessGuardActive, PROCESS_RESTART_EXIT_CODE } from "./process-guard.js";
 import {
@@ -622,10 +624,12 @@ class DiscordBotWorker {
       return;
     }
 
-    const thread = await this.createConversationThread(message.channel, {
+    const thread = await createConversationThreadFromMessage(message, {
       userLabel: message.member?.displayName ?? message.author.username,
       promptSeed: text,
-      language
+      language,
+      threadNamePrefix: this.discordConfig.threadNamePrefix,
+      threadAutoArchiveDuration: this.discordConfig.threadAutoArchiveDuration
     });
     const target = this.buildConversationTargetForThread(thread);
 
@@ -681,13 +685,15 @@ class DiscordBotWorker {
       );
     }
 
-    const thread = await this.createConversationThread(interaction.channel, {
+    const thread = await createConversationThreadFromChannel(interaction.channel, {
       userLabel:
         interaction.member && "displayName" in interaction.member
           ? interaction.member.displayName
           : interaction.user.username,
       promptSeed: options.promptSeed,
-      language: detectConversationLanguage(options.promptSeed)
+      language: detectConversationLanguage(options.promptSeed),
+      threadNamePrefix: this.discordConfig.threadNamePrefix,
+      threadAutoArchiveDuration: this.discordConfig.threadAutoArchiveDuration
     });
 
     return this.buildConversationTargetForThread(thread);
@@ -727,28 +733,6 @@ class DiscordBotWorker {
       scope: "thread",
       outputChannel: asSendableChannel(thread)
     };
-  }
-
-  private async createConversationThread(
-    channel: TextChannel | NewsChannel,
-    options: {
-      userLabel: string;
-      promptSeed: string;
-      language: "en" | "zh";
-    }
-  ): Promise<PublicThreadChannel<false>> {
-    const starterMessage = await channel.send({
-      content: localize(options.language, {
-        en: `Codex thread for ${options.userLabel}`,
-        zh: `${options.userLabel} 的 Codex 线程`
-      })
-    });
-
-    return starterMessage.startThread({
-      name: buildDiscordThreadName(this.discordConfig.threadNamePrefix, options.promptSeed),
-      autoArchiveDuration: this.discordConfig.threadAutoArchiveDuration,
-      reason: `Codex conversation created for ${options.userLabel}`
-    });
   }
 
   private isBotMentioned(message: Message): boolean {

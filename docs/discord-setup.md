@@ -150,6 +150,7 @@ This requires `systemd-run --user`. If host policy blocks transient user service
 - Slash `ask` in a guild text channel or announcement channel creates a thread automatically.
 - Slash `bind` in a guild text channel or announcement channel also creates a thread automatically.
 - Normal guild-channel messages are ignored unless they mention the bot.
+- Channel mentions start Codex in a thread rooted on the user's mention message, so the original prompt remains visible in the Discord thread.
 - In DMs, threads, or mention-driven conversations, sending `/codex bind <repo-id> <message>` binds first and immediately hands `<message>` to that repository worker.
 - Once a thread or DM is bound to a repo, later replies go straight to that worker session; use `/codex bind` or `/codex reset` to change the routing explicitly.
 - In an unbound top-level conversation, plain text like `create a task running per hour in arbitero` lets the handler create a scheduled background task under `.nuntius/scheduled-tasks/<task-id>/` for that repository without binding the thread.
