@@ -64,7 +64,12 @@ test("launchd service install writes a LaunchAgent and lifecycle commands target
     {
       command: "launchctl",
       args: ["bootstrap", "gui/501", definition.launchd.plistPath],
-      allowFailure: false
+      allowFailure: true
+    },
+    {
+      command: "launchctl",
+      args: ["print", "gui/501/com.hoolc.nuntius-test"],
+      allowFailure: true
     },
     {
       command: "launchctl",
@@ -77,13 +82,8 @@ test("launchd service install writes a LaunchAgent and lifecycle commands target
   assert.deepEqual(commands.splice(0), [
     {
       command: "launchctl",
-      args: ["bootout", "gui/501/com.hoolc.nuntius-test"],
+      args: ["print", "gui/501/com.hoolc.nuntius-test"],
       allowFailure: true
-    },
-    {
-      command: "launchctl",
-      args: ["bootstrap", "gui/501", definition.launchd.plistPath],
-      allowFailure: false
     },
     {
       command: "launchctl",
@@ -117,6 +117,98 @@ test("launchd service install writes a LaunchAgent and lifecycle commands target
     {
       command: "launchctl",
       args: ["bootout", "gui/501/com.hoolc.nuntius-test"],
+      allowFailure: true
+    }
+  ]);
+});
+
+test("launchd restart retries transient bootstrap input-output failures", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "nuntius-launchd-retry-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const workingDirectory = path.join(root, "repo");
+  mkdirSync(workingDirectory, { recursive: true });
+
+  const commands = [];
+  let bootstrapAttempts = 0;
+  const runCommand = async (command, args, options = {}) => {
+    commands.push({ command, args, allowFailure: Boolean(options.allowFailure) });
+    if (command === "launchctl" && args[0] === "bootstrap") {
+      bootstrapAttempts += 1;
+      if (bootstrapAttempts === 1) {
+        return {
+          code: 5,
+          stdout: "",
+          stderr: "Bootstrap failed: 5: Input/output error"
+        };
+      }
+    }
+
+    if (command === "launchctl" && args[0] === "print") {
+      return bootstrapAttempts >= 2
+        ? {
+            code: 0,
+            stdout: `${command} ${args.join(" ")}`,
+            stderr: ""
+          }
+        : {
+            code: 113,
+            stdout: "",
+            stderr: 'Could not find service "com.hoolc.nuntius-test" in domain for user gui: 501'
+          };
+    }
+
+    return {
+      code: 0,
+      stdout: `${command} ${args.join(" ")}`,
+      stderr: ""
+    };
+  };
+
+  const options = {
+    platform: "darwin",
+    serviceName: "nuntius-test",
+    homeDir: root,
+    uid: 501,
+    workingDirectory,
+    nodePath: "/opt/node/bin/node",
+    scriptPath: "/app/dist/index.js",
+    logDir: path.join(root, "logs"),
+    launchdBootstrapRetries: 2,
+    launchdBootstrapRetryDelayMs: 0,
+    runCommand
+  };
+
+  const definition = await installManagedService(options);
+  await restartManagedService(options);
+
+  assert.equal(bootstrapAttempts, 2);
+  assert.deepEqual(commands, [
+    {
+      command: "launchctl",
+      args: ["print", "gui/501/com.hoolc.nuntius-test"],
+      allowFailure: true
+    },
+    {
+      command: "launchctl",
+      args: ["bootstrap", "gui/501", definition.launchd.plistPath],
+      allowFailure: true
+    },
+    {
+      command: "launchctl",
+      args: ["print", "gui/501/com.hoolc.nuntius-test"],
+      allowFailure: true
+    },
+    {
+      command: "launchctl",
+      args: ["bootstrap", "gui/501", definition.launchd.plistPath],
+      allowFailure: true
+    },
+    {
+      command: "launchctl",
+      args: ["print", "gui/501/com.hoolc.nuntius-test"],
       allowFailure: true
     }
   ]);

@@ -38,6 +38,8 @@ export interface ServiceDefinitionOptions {
 
 export interface ServiceActionOptions extends ServiceDefinitionOptions {
   runCommand?: ServiceCommandRunner;
+  launchdBootstrapRetries?: number;
+  launchdBootstrapRetryDelayMs?: number;
 }
 
 export interface ManagedServiceDefinition {
@@ -72,6 +74,9 @@ export interface LogsCommandOptions extends ServiceDefinitionOptions {
 
 const DEFAULT_SERVICE_NAME = "nuntius";
 const DEFAULT_LOG_LINES = 200;
+const DEFAULT_LAUNCHD_BOOTSTRAP_RETRIES = 5;
+const DEFAULT_LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 1_000;
+const DEFAULT_LAUNCHD_LOAD_CHECKS = 5;
 
 export function buildManagedServiceDefinition(
   options: ServiceDefinitionOptions = {}
@@ -189,7 +194,7 @@ export async function startManagedService(
     if (!existsSync(launchd.plistPath)) {
       throw new Error(`LaunchAgent plist is not installed: ${launchd.plistPath}`);
     }
-    await runCommand("launchctl", ["bootstrap", launchd.domain, launchd.plistPath]);
+    await bootstrapLaunchdService(runCommand, launchd, options);
     await runCommand("launchctl", ["kickstart", "-k", launchd.target]);
     return definition;
   }
@@ -224,9 +229,12 @@ export async function restartManagedService(
 
   if (definition.platform === "darwin") {
     const launchd = requireLaunchd(definition);
-    await runCommand("launchctl", ["bootout", launchd.target], { allowFailure: true });
-    await runCommand("launchctl", ["bootstrap", launchd.domain, launchd.plistPath]);
-    await runCommand("launchctl", ["kickstart", "-k", launchd.target]);
+    if (await isLaunchdServiceLoaded(runCommand, launchd)) {
+      await runCommand("launchctl", ["kickstart", "-k", launchd.target]);
+      return definition;
+    }
+
+    await bootstrapLaunchdService(runCommand, launchd, options);
     return definition;
   }
 
@@ -486,6 +494,96 @@ function requireSystemd(definition: ManagedServiceDefinition): NonNullable<Manag
   return definition.systemd;
 }
 
+async function bootstrapLaunchdService(
+  runCommand: ServiceCommandRunner,
+  launchd: NonNullable<ManagedServiceDefinition["launchd"]>,
+  options: Pick<ServiceActionOptions, "launchdBootstrapRetries" | "launchdBootstrapRetryDelayMs">
+): Promise<void> {
+  const args = ["bootstrap", launchd.domain, launchd.plistPath];
+  const maxAttempts = Math.max(
+    1,
+    options.launchdBootstrapRetries ?? DEFAULT_LAUNCHD_BOOTSTRAP_RETRIES
+  );
+  const delayMs = Math.max(
+    0,
+    options.launchdBootstrapRetryDelayMs ?? DEFAULT_LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS
+  );
+  let lastResult: CommandResult | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const result = await runCommand("launchctl", args, { allowFailure: true });
+    if (result.code === 0) {
+      if (await waitForLaunchdServiceLoaded(runCommand, launchd, delayMs)) {
+        return;
+      }
+
+      lastResult = {
+        code: 37,
+        stdout: "",
+        stderr: `launchctl bootstrap returned success, but ${launchd.target} was not visible in launchd.`
+      };
+      continue;
+    }
+
+    lastResult = result;
+    if (await isLaunchdServiceLoaded(runCommand, launchd)) {
+      return;
+    }
+
+    if (!isRetriableLaunchdBootstrapFailure(result) || attempt === maxAttempts) {
+      break;
+    }
+
+    await delay(delayMs);
+  }
+
+  throw new Error(formatCommandFailure("launchctl", args, lastResult));
+}
+
+async function isLaunchdServiceLoaded(
+  runCommand: ServiceCommandRunner,
+  launchd: NonNullable<ManagedServiceDefinition["launchd"]>
+): Promise<boolean> {
+  const result = await runCommand("launchctl", ["print", launchd.target], {
+    allowFailure: true
+  });
+  return result.code === 0;
+}
+
+async function waitForLaunchdServiceLoaded(
+  runCommand: ServiceCommandRunner,
+  launchd: NonNullable<ManagedServiceDefinition["launchd"]>,
+  delayMs: number
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= DEFAULT_LAUNCHD_LOAD_CHECKS; attempt += 1) {
+    if (await isLaunchdServiceLoaded(runCommand, launchd)) {
+      return true;
+    }
+
+    if (attempt < DEFAULT_LAUNCHD_LOAD_CHECKS) {
+      await delay(delayMs);
+    }
+  }
+
+  return false;
+}
+
+function isRetriableLaunchdBootstrapFailure(result: CommandResult): boolean {
+  const output = `${result.stdout}\n${result.stderr}`;
+  return result.code === 5 || /Bootstrap failed:\s*5|Input\/output error/i.test(output);
+}
+
+function formatCommandFailure(
+  command: string,
+  args: string[],
+  result: CommandResult | undefined
+): string {
+  const detail = result
+    ? result.stderr || result.stdout || `exit code ${result.code}`
+    : "unknown failure";
+  return `${command} ${args.join(" ")} failed:\n${detail}`;
+}
+
 function plistKeyString(key: string, value: string): string {
   return `  <key>${escapeXml(key)}</key>\n  <string>${escapeXml(value)}</string>`;
 }
@@ -549,5 +647,15 @@ async function spawnAndCapture(command: string, args: string[]): Promise<Command
         stderr: stderr.trim()
       });
     });
+  });
+}
+
+async function delay(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    setTimeout(resolve, ms);
   });
 }
